@@ -3,49 +3,73 @@
 ## 1. Overview
 Hijac is a mobile-first application that Hijacs your daily routine to do things for you. It reads sensor data from your phone in real time—location, gyroscope, accelerometer, time, and more—and uses an AI agent or user-defined automation rules to perform tasks on your behalf without you having to think about it.
 
-Hijac is built on top of the Jac Lang agentic framework, compiled to a Progressive Web App (PWA) using Capacitor for access to native device sensors on Android (Samsung Galaxy S23+), with InsForge as the backend infrastructure and **Backboard.ai** powering the persistent memory layer for the agent.
+Hijac is built entirely in **Jac**—an AI-native programming language. The application uses Jac's custom `hj` (Hijac) codespace to compile to JavaScript, which is automatically wrapped with Capacitor as a Progressive Web App (PWA) for access to native device sensors on Android (Samsung Galaxy S23+). All agent logic (walkers, nodes) runs on-device, with InsForge and **Backboard.ai** called via API for persistence and memory.
 
 ## 2. Goals
 * Deliver a working demo that reads at least two sensor inputs (location + one analog sensor) and triggers a real action.
-* Get a Jac Lang client running on mobile via Capacitor/PWA.
-* Integrate InsForge as the backend (database, auth, functions)—the agent's persistence layer.
-* Integrate **Backboard.ai** as the agent's persistent memory layer so it can reason about patterns over time and solve "AI amnesia."
+* Write the entire application in Jac language using the `hj` codespace (compiles to JS + Capacitor for mobile).
+* Integrate InsForge API for database, auth, and persistence (called directly from mobile app).
+* Integrate **Backboard.ai** API for persistent agent memory (called directly from mobile app).
 * Win sponsor tracks for Jac Lang, InsForge, and Backboard.ai.
 
 ## 3. Tech Stack
 
 | Layer | Technology |
 | :--- | :--- |
-| **Mobile Compilation** | Capacitor (PWA → native Android wrapper) |
+| **Primary Language** | Jac (AI-native full-stack language) |
+| **Mobile Compilation** | Jac `hj { }` codespace → JavaScript → Capacitor → Android PWA |
 | **Sensor APIs** | Capacitor plugins: Geolocation, Motion, Device |
-| **Frontend** | Web app (React or vanilla JS) |
-| **Agentic Framework** | Jac Lang (primary) |
-| **Backend Infra** | InsForge (DB, auth, storage, edge functions, model gateway) |
-| **Agent Memory** | Backboard.ai |
+| **App Logic** | Jac walkers + nodes (all runs on-device) |
+| **Backend Infra** | InsForge (DB, auth, storage, edge functions - called via API) |
+| **Agent Memory** | Backboard.ai (called via API) |
 | **Target Device** | Samsung Galaxy S23 (Android) |
+
+### The `hj` Codespace (Mobile Target)
+The `hj` codespace is a custom compilation target for mobile-first apps:
+
+```
+hj { }
+   ↓
+JavaScript (PWA bundle)
+   ↓
+Capacitor (automatic wrapper)
+   ↓
+Android/iOS Native App
+```
+
+**What `hj` provides:**
+- Automatic Capacitor integration (no manual setup)
+- Pre-configured sensor plugin imports (Geolocation, Motion, Device)
+- Native permission handling for Android/iOS
+- Direct access to Capacitor APIs from Jac code
+- Single build command: `jac build --target mobile app.jac`
+
+**All logic runs on-device** - walkers traverse nodes locally, API calls to InsForge/Backboard go directly from the mobile app.
 
 ## 4. Architecture
 
 ```text
-[Sensor Layer]           [App Layer]              [Agent Layer]
-  Geolocation      →                          →   Jac Lang Agent
-  Gyroscope        →   Capacitor PWA (React)  →      ↕
-  Accelerometer    →                          →   Backboard.ai (memory)
-  Time/Calendar    →                          →      ↕
-                                              →   InsForge (DB + functions)
-                                                       ↓
-                                               [Action Execution]
-                                               Maps, Calendar, Notifications,
-                                               HTTP webhooks, etc.
+[Sensor Layer]        [App Layer - All On-Device]           [External APIs]
+   Geolocation      →                                    →   Backboard.ai
+   Gyroscope        →   Jac hj { } compiled to JS         →   (Memory)
+   Accelerometer    →   + Capacitor                        →
+   Time/Calendar    →       ↓                              →   InsForge
+                          ↓                                →   (DB + Auth)
+                     Nodes + Walkers                       →
+                     (state + agent logic)
+                          ↓
+                   [Action Execution]
+                   Maps, Notifications, Webhooks
 ```
 
 **Data Flow:**
 1.  Capacitor plugins poll or subscribe to sensor events.
-2.  Sensor data is sent to the Jac Lang agent via an InsForge edge function.
-3.  The agent queries Backboard.ai for historical context, persistent state, and learned patterns.
-4.  The agent evaluates user-defined rules + AI reasoning to decide whether to trigger an action.
-5.  Actions are executed (deep links, API calls, notifications).
-6.  Results are logged back to InsForge, and Backboard.ai automatically updates its memory engine.
+2.  Sensor data creates/updates nodes in the Jac object graph (on-device).
+3.  Jac walkers traverse the graph to analyze sensor state and patterns.
+4.  Walkers call Backboard.ai API for historical context via `by llm()` constructs.
+5.  Walkers evaluate user-defined rules + AI reasoning to decide whether to trigger an action.
+6.  Actions are executed (deep links, API calls, notifications).
+7.  Results are logged to the Jac graph (auto-persisted locally) and synced to InsForge API.
 
 ## 5. Core Features
 
@@ -64,8 +88,15 @@ Users can define simple "if sensor → then action" automation rules without AI,
 * `IF device_is_shaken AND time < 08:00 THEN send_snooze_message`
 * `IF walking_speed > 0 AND location = gym_area THEN log_workout_start`
 
-### Feature 3 — AI Agent (Jac Lang)
-An AI agent that goes beyond static rules. The agent observes sensor patterns over time (via Backboard.ai memory), infers context, and proactively takes actions or makes suggestions.
+### Feature 3 — AI Agent (Jac Walker)
+An AI agent that goes beyond static rules. The agent is implemented as a **Jac walker** that traverses a graph of sensor nodes, observes patterns over time (via Backboard.ai memory), infers context, and proactively takes actions or makes suggestions.
+
+**Jac Object-Spatial Programming Model:**
+* **Nodes:** Represent sensor states (LocationNode, MotionNode, TimeNode), user contexts, and action targets
+* **Edges:** Connect related states (e.g., LocationNode --at_time--> TimeNode)
+* **Walkers:** The agent that traverses nodes, making decisions based on the graph structure
+* **`by llm()`:** Jac's native AI construct—replaces manual prompt engineering with type-safe LLM calls
+
 **Agent capabilities:**
 * **Pattern detection:** "You always leave work at 5:10 PM on Tuesdays."
 * **Contextual reasoning:** "Your phone is oriented portrait + you're walking + it's 5 PM = commute home."
@@ -90,157 +121,429 @@ Simple mobile UI where the user can:
 ## 6. Sponsor Track Integration
 
 ### 6A — Jac Lang (Primary Framework)
-Jac Lang provides the agentic framework that powers Hijac's intelligence layer. This is the core of the project.
-**Integration tasks:**
-* Get the Jac Lang JS/TS client running in a Capacitor-wrapped web view on Android.
-* Define the agent's system prompt with context about available sensors and actions.
-* Wire sensor payloads into the agent's context window on each significant event.
-* Define tool functions the agent can call (`trigger_maps`, `send_notification`, `log_event`, etc.).
-* Test end-to-end: sensor input → agent reasoning → action execution.
+Jac is an AI-native full-stack programming language with built-in agentic constructs. Unlike traditional frameworks, Jac incorporates agents (walkers), graph-based state (nodes/edges), and LLM integration (`by llm()`) directly into the language grammar.
 
-**Why it fits:** Jac Lang is literally the brain of Hijac. The hackathon is sponsored by them, and Hijac is built ground-up on their framework. This is not a sprinkled integration—it's structural.
+**Integration tasks:**
+* Install Jac: `pip install jaseci` and set up the development environment.
+* Create a Jac project with the `hj` codespace: `jac create --use hijac hijac` (enables mobile compilation).
+* Define sensor nodes: `node LocationNode`, `node MotionNode`, `node TimeNode` with `has` data fields.
+* Define the agent walker: `walker HijacAgent` that traverses sensor nodes and decides actions.
+* Use `by llm()` for AI reasoning instead of manual prompt engineering—Jac auto-generates prompts from type signatures.
+* Wire Capacitor sensor events to update Jac node states in the graph.
+* Implement action handlers as node abilities: `can open_maps`, `can send_notification`, etc.
+* Build mobile app: `jac build --target mobile app.jac` (compiles `hj` blocks and wraps with Capacitor).
+
+**Why it fits:** Jac is the brain of Hijac. The hackathon is sponsored by Jac, and Hijac is built ground-up on the language itself. This demonstrates Jac's ability to build mobile-first AI apps with walkers, nodes, and `by llm()` - all running on-device.
 
 ### 6B — InsForge (Backend for Agentic Development)
 InsForge is a backend platform built for AI agents. It exposes databases, auth, storage, and edge functions through a semantic layer that agents can understand and operate directly. Think of it as "Supabase but the agent drives."
+
 **Integration tasks:**
 * Set up an InsForge project (cloud).
-* Create a `sensor_events` table: `{ user_id, sensor_type, value, timestamp }`.
-* Create a `user_rules` table: `{ user_id, trigger_condition, action_type, action_params, enabled }`.
-* Create an `action_log` table: `{ user_id, triggered_at, rule_or_agent, action_taken, result }`.
-* Expose an InsForge edge function `evaluate_rules(sensor_payload)` that the Capacitor app calls on each sensor event.
-* Let the Jac Lang agent call InsForge directly to read/write user history.
+* Create tables: `sensor_events`, `user_rules`, `action_log`, `user_patterns` via InsForge CLI.
+* In `hj { }` blocks, call InsForge API directly from the mobile app:
+  ```jac
+  hj {
+      def log_sensor_event(event: dict) -> void {
+          fetch("https://insforge.api/sensor_events", {
+              method: "POST",
+              body: event
+          });
+      }
+  }
+  ```
 * Auth: use InsForge auth to identify the user's device session.
+* Let walkers query InsForge for historical data and user rules.
 
-**Why it fits:** InsForge was built exactly for this—AI agents that need to ship full-stack apps with a persistent backend. The agent querying and writing to InsForge directly is the ideal demo of their platform.
+**Why it fits:** InsForge was built for AI agents that need persistent storage. The Jac walker on the mobile device calls InsForge APIs directly - demonstrating agent-driven backend operations.
 
 ### 6C — Backboard.ai (Persistent Memory Layer)
 Backboard.ai serves as the persistent memory layer for Hijac's agent, solving the classic "AI amnesia" problem. It acts as a unified state system that captures user habits over time without requiring fragile workarounds.
-**Integration tasks:**
-* Set up Backboard.ai and connect it to the Jac Lang agent via its API.
-* Utilize Backboard's **Memory Engine** to automatically extract and persist facts (like typical commute times or locations).
-* On each significant sensor event, use Backboard.ai's **State Manager** to maintain conversational and behavioral context: *"User left office coordinates at 17:08."*
-* Before taking action, the agent retrieves grounded historical context from Backboard.ai to check: *"Have I seen this pattern before? How many times?"*
-* If pattern confidence > threshold → agent acts autonomously; otherwise, it suggests and asks.
 
-**Why it fits:** Backboard.ai is the "long-term brain" of Hijac. Without a stateful memory layer, the agent would be stateless and dumb—it would never learn that you always go home at 5 PM. Backboard.ai is what transforms Hijac from a simple automation tool into an agent that genuinely learns your life across multiple sessions.
+**Integration tasks:**
+* Set up Backboard.ai account and get API key.
+* In `hj { }` blocks, create API wrapper functions:
+  ```jac
+  hj {
+      def write_observation(user_id: str, observation: str) -> void {
+          fetch("https://api.backboard.ai/memory/write", {
+              method: "POST",
+              headers: {"Authorization": f"Bearer {BACKBOARD_KEY}"},
+              body: {user_id, observation}
+          });
+      }
+      
+      def read_context(user_id: str) -> dict {
+          resp = fetch(f"https://api.backboard.ai/memory/read/{user_id}");
+          return resp.json();
+      }
+  }
+  ```
+* Utilize Backboard's **Memory Engine** to automatically extract and persist facts.
+* Before taking action, walkers retrieve historical context from Backboard.ai.
+* If pattern confidence > threshold → walker acts autonomously; otherwise, suggests and asks.
+
+**Why it fits:** Backboard.ai is the "long-term brain" of Hijac. The Jac walker calls Backboard.ai API to store and retrieve patterns - transforming Hijac from a simple automation tool into an agent that learns your life across multiple sessions.
 
 ## 7. Implementation Tasks
 *(Tasks are organized by priority. Complete them in order for the demo.)*
 
-### PHASE 1 — Mobile Foundation (Priority: CRITICAL)
-**Task 1.1 — Scaffold the Capacitor project**
-* Create a new web app project (React or Vite).
-* Install Capacitor: `npm install @capacitor/core @capacitor/cli`
-* Initialize Capacitor: `npx cap init Hijac com.Hijac.app`
-* Add Android platform: `npx cap add android`
-* Configure `capacitor.config.ts` with correct `webDir`.
-* Verify: `npx cap sync android` runs without errors.
+### PHASE 1 — Jac Foundation & Mobile Setup (Priority: CRITICAL)
+**Task 1.1 — Install and configure Jac**
+* Install Jaseci stack: `pip install jaseci`
+* Verify installation: `jac --version`
+* Install VS Code extension for Jac language support (optional but recommended).
 
-**Task 1.2 — Install sensor plugins**
-* Install Geolocation, Motion, and Device plugins.
-* Add required Android permissions to `AndroidManifest.xml` (`ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`, `HIGH_SAMPLING_RATE_SENSORS`).
-* Test: log GPS coordinates to console on a real device.
+**Task 1.2 — Scaffold the Jac project**
+* Create project with `hj` codespace: `jac create --use hijac hijac`
+* This creates a Jac project configured for mobile compilation.
+* Project structure includes `.jac` files with all logic in `hj` blocks.
 
-**Task 1.3 — Build sensor manager module**
-* Create `src/sensors/SensorManager.ts`.
-* Implement `startGeolocation(callback)` and `startMotion(callback)`.
-* Implement `getContext()` (time, dayOfWeek, batteryLevel, networkType).
-* Normalize all sensor values into a standard `SensorEvent` object.
-* Implement debouncing so rapid sensor changes don't spam the agent.
+**Task 1.3 — Define sensor nodes in Jac**
+* Create `nodes.jac` with node definitions:
+  ```jac
+  node LocationNode {
+      has lat: float;
+      has lng: float;
+      has accuracy: float;
+      has timestamp: int;
+  }
+  
+  node MotionNode {
+      has accel_x: float;
+      has accel_y: float;
+      has accel_z: float;
+      has gyro_x: float;
+      has gyro_y: float;
+      has gyro_z: float;
+  }
+  
+  node TimeNode {
+      has day_of_week: str;
+      has hour: int;
+      has minute: int;
+  }
+  ```
+* Connect nodes to `root` for automatic persistence.
 
-**Task 1.4 — Run Jac Lang client in Capacitor web view**
-* Install the Jac Lang JS client SDK.
-* Initialize the Jac client in `src/agent/JacClient.ts`.
-* Test: send a hardcoded message to the Jac agent and receive a response.
+**Task 1.4 — Build with `hj` codespace**
+* The `hj` codespace automatically handles Capacitor integration.
+* Build command: `jac build --target mobile app.jac`
+* This compiles `hj { }` blocks to JavaScript and wraps with Capacitor.
+* Output includes Android project in `android/` directory ready for APK build.
 
-### PHASE 2 — Backend Setup (Priority: CRITICAL)
+**Task 1.5 — Configure sensor permissions**
+* The `hj` codespace auto-configures Capacitor plugins (Geolocation, Motion, Device).
+* Add required Android permissions to `AndroidManifest.xml`:
+  * `ACCESS_FINE_LOCATION`
+  * `ACCESS_COARSE_LOCATION`
+  * `HIGH_SAMPLING_RATE_SENSORS`
+  * `ACCESS_BACKGROUND_LOCATION` (for Android 12+)
+
+**Task 1.6 — Bridge sensors to Jac nodes in `hj` blocks**
+* In Jac `hj { }` blocks, use pre-configured Capacitor plugin imports:
+  ```jac
+  hj {
+      def update_location_node(node: LocationNode) -> void {
+          pos = Geolocation.getCurrentPosition();
+          node.lat = pos.coords.latitude;
+          node.lng = pos.coords.longitude;
+          node.accuracy = pos.coords.accuracy;
+      }
+  }
+  ```
+* Implement debouncing to prevent rapid updates.
+
+### PHASE 2 — InsForge & Backboard API Setup (Priority: CRITICAL)
 **Task 2.1 — Set up InsForge**
-* Clone InsForge and configure `.env`.
-* Run: `docker compose -f docker-compose.prod.yml up`
-* Create the required tables (`sensor_events`, `user_rules`, `action_log`, `user_patterns`) via CLI.
+* Create InsForge cloud project.
+* Create tables via CLI: `sensor_events`, `user_rules`, `action_log`, `user_patterns`.
+* Get API credentials (endpoint URL, API key).
 
-**Task 2.2 — InsForge auth + user session**
-* Set up InsForge auth.
-* On app launch, silently create/retrieve a device-based user session.
-* Store the session token using Capacitor's `@capacitor/preferences` plugin.
+**Task 2.2 — Set up Backboard.ai**
+* Create Backboard.ai account.
+* Get API key for Memory Engine access.
 
-**Task 2.3 — InsForge edge function: evaluate_rules**
-* Create an InsForge edge function that accepts a `SensorEvent` payload, queries `user_rules`, evaluates conditions, and returns a list of triggered actions.
+**Task 2.3 — Create API wrapper functions in `hj`**
+* In `hj { }` blocks, create functions to call InsForge and Backboard:
+  ```jac
+  hj {
+      # InsForge
+      def insforge_insert(table: str, data: dict) -> void { ... }
+      def insforge_query(table: str, filters: dict) -> list { ... }
+      
+      # Backboard
+      def backboard_write(user_id: str, obs: str) -> void { ... }
+      def backboard_read(user_id: str) -> dict { ... }
+  }
+  ```
 
-**Task 2.4 — Connect Jac Lang agent to InsForge**
-* Define InsForge tool functions the Jac agent can call (`insforge_log_event`, `insforge_get_history`, `insforge_log_action`, `insforge_get_user_rules`).
+**Task 2.4 — InsForge auth + user session**
+* Implement InsForge auth flow in `hj` blocks.
+* Store session token using `hj` built-in storage (Capacitor Preferences).
+* Attach auth headers to all API calls.
 
-### PHASE 3 — Agent Integration (Priority: HIGH)
-**Task 3.1 — Define the Jac Lang agent**
-* Write the agent system prompt (see Appendix A).
-* Define the agent's available tools.
-* Define the agent's decision loop.
+### PHASE 3 — Jac Walker Agent Implementation (Priority: HIGH)
+**Task 3.1 — Define the Jac walker (agent)**
+* Create `agent.jac` with the HijacAgent walker:
+  ```jac
+  walker HijacAgent {
+      has auto_mode: bool = false;
+      has confidence_threshold: float = 0.7;
+      
+      # Entry point: start at root
+      can start with Root entry {
+          visit [-->];  # Traverse all connected nodes
+      }
+      
+      # When visiting a LocationNode
+      can analyze_location with LocationNode entry {
+          # Get context from Backboard.ai
+          context = backboard_read(user_id);
+          
+          # Use by llm() for AI reasoning
+          decision = by llm() -> str {
+              "Should I trigger an action based on this location?"
+          };
+          if decision == "yes" {
+              take_action(here);
+          }
+          visit [-->];
+      }
+  }
+  ```
 
-**Task 3.2 — Wire sensors to the agent**
-* In `SensorManager`, on each significant event, call `JacClient.sendEvent(sensorEvent)`.
-* Implement a throttle (e.g., 30 seconds max invocation rate).
+**Task 3.2 — Wire sensors to walker traversal**
+* On each significant sensor event, spawn the walker:
+  ```jac
+  root spawn HijacAgent(auto_mode=True);
+  ```
+* Implement throttling (e.g., max one spawn per 30 seconds).
 
-**Task 3.3 — Set up Backboard.ai**
-* Create a Backboard.ai account and install the SDK.
-* Create `src/agent/BackboardClient.ts`.
-* Implement `writeObservation()`, `readContext()`, and `updateConfidence()` using Backboard.ai's API.
+**Task 3.3 — Implement `by llm()` reasoning**
+* Use Jac's `by llm()` construct for type-safe AI calls:
+  ```jac
+  def should_trigger_action(location: LocationNode, time: TimeNode) -> bool by llm() {
+      # Jac auto-generates prompt from function signature
+      # and parses response to return bool
+  }
+  ```
 
 **Task 3.4 — Agent memory loop**
-* Before reasoning, call `BackboardClient.readContext()` and inject state into the context.
-* After events, call `BackboardClient.writeObservation()`.
-* After success, call `BackboardClient.updateConfidence()`.
+* Before reasoning, walkers call `backboard_read()` to get historical patterns.
+* After events, walkers call `backboard_write()` to record new patterns.
+* Use `by llm()` to evaluate confidence based on Backboard.ai context.
+* Log all events to InsForge via `insforge_insert()`.
 
-### PHASE 4 — Action Execution (Priority: HIGH)
-**Task 4.1 — Action: Open Google Maps to home**
-* Implement `actions/openMapsHome.ts` utilizing deep links.
+### PHASE 4 — Action Execution as Node Abilities (Priority: HIGH)
+**Task 4.1 — Define action abilities on nodes**
+* Add action methods to nodes using `can`:
+  ```jac
+  node ActionNode {
+      can open_maps(destination: str) -> void {
+          # Use Capacitor to open deep link
+          link = f"geo:0,0?q={destination}";
+          window.open(link);
+      }
+      
+      can send_notification(title: str, body: str) -> void {
+          # Use Capacitor LocalNotifications
+          LocalNotifications.schedule({notifications: [{title, body}]});
+      }
+  }
+  ```
 
-**Task 4.2 — Action: Send local push notification**
-* Install `@capacitor/local-notifications` and implement handler.
+**Task 4.2 — Action: Open Google Maps to home**
+* Implement `can open_maps_home` on ActionNode.
+* Use Capacitor's App plugin to open deep links.
 
-**Task 4.3 — Action: Generic webhook**
-* Implement `actions/sendWebhook.ts(url, payload)`.
+**Task 4.3 — Action: Send local push notification**
+* The `hj` codespace includes pre-configured `@capacitor/local-notifications`.
+* Use directly in `hj { }` blocks.
+* Implement notification scheduling.
 
-**Task 4.4 — Action dispatcher**
-* Create `ActionDispatcher.ts` to route triggers to the correct handlers. After action, log via InsForge and update Backboard.ai confidence.
+**Task 4.4 — Action: Generic webhook**
+* Implement `can send_webhook(url: str, payload: dict)` using fetch API.
+* Callable from `hj` mobile code.
 
-### PHASE 5 — UI (Priority: MEDIUM)
-* **Task 5.1:** Sensor dashboard (live display for demo).
-* **Task 5.2:** Rules manager (enable/disable toggles).
-* **Task 5.3:** Action history feed.
-* **Task 5.4:** Agent chat interface (Stretch goal).
+**Task 4.5 — Walker action dispatcher**
+* Walkers call node abilities directly when traversing:
+  ```jac
+  walker HijacAgent {
+      can execute_actions with ActionNode entry {
+          if here.should_trigger {
+              here.open_maps("home");
+              log_action(here);  # Log to InsForge
+          }
+      }
+  }
+  ```
+* After action, log via InsForge (call server function) and update Backboard.ai.
 
-### PHASE 6 — Demo Polish (Priority: MEDIUM)
-* **Task 6.1:** Rehearse the exact demo flow.
-* **Task 6.2:** Build and deploy APK to the Samsung Galaxy S23.
-* **Task 6.3:** Fallback demo mode ("Simulate Sensor" button to fake a GPS event if location services drop).
+### PHASE 5 — UI in Jac Mobile Code (Priority: MEDIUM)
+* **Task 5.1:** Sensor dashboard in `hj { }` blocks using React-like syntax (live display for demo).
+* **Task 5.2:** Rules manager UI (enable/disable toggles) with Jac state management.
+* **Task 5.3:** Action history feed displaying data from InsForge.
+* **Task 5.4:** Agent chat interface (Stretch goal)—can use `by llm()` for conversational responses.
 
-## 8. Appendix A — Jac Lang Agent System Prompt (Draft)
+### PHASE 6 — Demo Polish & Deployment (Priority: MEDIUM)
+* **Task 6.1:** Compile Jac to JavaScript: `jac build app.jac` (generates JS bundle).
+* **Task 6.2:** Sync with Capacitor: `npx cap sync android`.
+* **Task 6.3:** Build APK: Open Android Studio from `android/` folder and build signed APK.
+* **Task 6.4:** Deploy APK to Samsung Galaxy S23 via USB debugging.
+* **Task 6.5:** Rehearse exact demo flow with live sensor triggers.
+* **Task 6.6:** Implement "Simulate Sensor" fallback button in UI (fake GPS event if location services drop).
 
-```text
-You are Hijac, a mobile AI agent that monitors sensor data from the user's 
-phone and takes actions on their behalf to optimize their daily routine.
+## 8. Appendix A — Jac Walker Agent Example
 
-You have access to the following tools:
-- insforge_get_history: Read recent sensor events from the user's history
-- insforge_log_event: Save a sensor event to the database
-- insforge_log_action: Record when you take an action and what happened
-- backboard_read_context: Read persistent state and recent observations
-- backboard_write_observation: Send a new observation to the Memory Engine
-- backboard_update_confidence: Increase or decrease pattern confidence
-- action_open_maps: Open Google Maps to a destination
-- action_send_notification: Send a push notification to the user
-- action_send_webhook: Send a webhook to an external URL
+```jac
+# hijac_agent.jac - Core agent implementation (all runs on-device)
 
-When you receive a sensor event:
-1. Read Backboard.ai context to understand the user's routine patterns.
-2. Determine if this event matches a known pattern with high confidence (>0.7).
-3. If yes and auto-mode is on, take the action autonomously and log it.
-4. If yes but confidence is lower, send a notification asking the user.
-5. If no known pattern, write a new observation to Backboard.ai.
-6. Always log the sensor event to InsForge.
+# Define the sensor nodes
+node LocationNode {
+    has lat: float;
+    has lng: float;
+    has accuracy: float;
+    has timestamp: int;
+    
+    can is_near(target_lat: float, target_lng: float, radius_m: float) -> bool {
+        distance = calculate_distance(here.lat, here.lng, target_lat, target_lng);
+        return distance <= radius_m;
+    }
+}
 
-Be proactive but not annoying. Only surface actions that genuinely help.
+node TimeNode {
+    has day: str;
+    has hour: int;
+    has minute: int;
+    
+    can is_workday() -> bool {
+        return here.day in ["MON", "TUE", "WED", "THU", "FRI"];
+    }
+    
+    can is_after(hour_threshold: int) -> bool {
+        return here.hour >= hour_threshold;
+    }
+}
+
+# Mobile app code (compiles to JS + Capacitor)
+hj {
+    # API wrappers - call external services directly
+    def read_context(user_id: str) -> dict {
+        resp = fetch(f"https://api.backboard.ai/memory/read/{user_id}", {
+            headers: {"Authorization": f"Bearer {BACKBOARD_KEY}"}
+        });
+        return resp.json();
+    }
+    
+    def write_observation(user_id: str, obs: str) -> void {
+        fetch("https://api.backboard.ai/memory/write", {
+            method: "POST",
+            headers: {"Authorization": f"Bearer {BACKBOARD_KEY}"},
+            body: {user_id, observation: obs}
+        });
+        
+        # Also log to InsForge
+        insforge_insert('sensor_events', {user_id, observation: obs});
+    }
+    
+    def log_action(user_id: str, action: str, result: str) -> void {
+        insforge_insert('action_log', {
+            user_id, action, result, timestamp: Date.now()
+        });
+    }
+    
+    def insforge_insert(table: str, data: dict) -> void {
+        fetch(f"https://api.insforge.io/{table}", {
+            method: "POST",
+            headers: {
+                "Authorization": f"Bearer {INSFORGE_KEY}",
+                "Content-Type": "application/json"
+            },
+            body: data
+        });
+    }
+    
+    # Action handlers using Capacitor
+    def take_action(node: LocationNode) -> void {
+        if node.is_near(OFFICE_LAT, OFFICE_LNG, 200) {
+            # Open Google Maps to home
+            window.open(f"geo:0,0?q=Home");
+            log_action(user_id, "open_maps", "success");
+        }
+    }
+    
+    def suggest_action(node: LocationNode) -> void {
+        LocalNotifications.schedule({
+            notifications: [{
+                title: "Hijac",
+                body: "Want me to open Maps to home?",
+                id: 1
+            }]
+        });
+    }
+}
+
+# Define the agent walker
+walker HijacAgent {
+    has auto_mode: bool = false;
+    has confidence_threshold: float = 0.7;
+    
+    # Entry point
+    can start with Root entry {
+        visit [-->];
+    }
+    
+    # Analyze location context
+    can analyze with LocationNode entry {
+        # Get historical context from Backboard.ai
+        context = read_context(user_id);
+        
+        # Use by llm() for AI reasoning
+        should_act: bool = by llm(
+            location=here,
+            history=context,
+            auto_mode=auto_mode
+        ) -> bool {
+            "Based on the user's location history and current context,
+             should I trigger an automated action?"
+        };
+        
+        if should_act and auto_mode {
+            take_action(here);
+        } else if should_act {
+            suggest_action(here);
+        }
+        
+        # Record observation
+        write_observation(user_id, f"User at {here.lat}, {here.lng}");
+        
+        visit [-->];
+    }
+}
+
+# Main entry point
+with entry {
+    # Initialize graph
+    loc = LocationNode(lat=0.0, lng=0.0, accuracy=0.0, timestamp=0);
+    time = TimeNode(day="MON", hour=17, minute=0);
+    
+    # Connect to root for persistence
+    root ++> loc;
+    root ++> time;
+    
+    # Spawn agent
+    root spawn HijacAgent(auto_mode=True);
+}
 ```
+
+**Key Jac Features Demonstrated:**
+* **Nodes:** `LocationNode` and `TimeNode` represent sensor state
+* **Walkers:** `HijacAgent` traverses nodes and makes decisions
+* **`by llm()`:** AI reasoning without manual prompt engineering
+* **`hj` codespace:** All code compiles to JS + Capacitor for mobile
+* **Automatic persistence:** Nodes connected to `root` are auto-saved locally
+* **Direct API calls:** Call InsForge/Backboard directly from mobile app - no server needed
 
 ## 9. Appendix B — Demo Rule Seed Data (InsForge)
 *Seed these rules into InsForge for the demo:*
@@ -276,8 +579,10 @@ Be proactive but not annoying. Only surface actions that genuinely help.
 
 | Risk | Mitigation |
 | :--- | :--- |
-| Jac Lang client may not support web/Capacitor out of the box. | Test this first (Task 1.4); if blocked, wrap API calls via InsForge edge function as proxy. |
-| Capacitor Geolocation may require background permissions on Android 12+. | Request `ACCESS_BACKGROUND_LOCATION` in manifest; handle the permission dialog in-app. |
-| Backboard.ai API access during hackathon. | Implement a local fallback: store patterns in InsForge `user_patterns` table and read from there. |
+| Jac `hj` codespace is custom - may need implementation work. | Test early; have fallback to vanilla JS + Capacitor if needed. |
+| Jac is a newer language—may encounter compiler bugs or missing features. | Have fallback plan: write critical path in vanilla JS if Jac compilation fails. |
+| Capacitor Geolocation requires background permissions on Android 12+. | Request `ACCESS_BACKGROUND_LOCATION` in manifest; handle permission dialog in-app. |
+| Backboard.ai API access during hackathon. | Implement local fallback: store patterns in Jac's auto-persisted nodes + InsForge. |
 | Samsung Galaxy S23 APK sideloading requires USB debugging enabled. | Enable developer mode + USB debugging before the hackathon starts. |
-| Demo location might not trigger real GPS rules. | Implement the "Simulate Sensor" button (Task 6.3) as a mandatory fallback. | jachacks
+| Demo location might not trigger real GPS rules. | Implement "Simulate Sensor" button (Task 6.6) as mandatory fallback. |
+| API calls from mobile may have CORS issues. | InsForge/Backboard should support CORS; test API calls early. | jachacks
