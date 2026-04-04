@@ -393,6 +393,102 @@ Backboard.ai serves as the persistent memory layer for Hijac's agent, solving th
 * **Task 6.4:** Deploy APK to Samsung Galaxy S23 via USB debugging.
 * **Task 6.5:** Rehearse exact demo flow with live sensor triggers.
 * **Task 6.6:** Implement "Simulate Sensor" fallback button in UI (fake GPS event if location services drop).
+* **Task 6.7:** Primary pitch demo should be **Tabletop Ritual Agent**: set phone down -> agent enters focus conversation mode -> pick phone up -> agent executes wrap-up actions.
+
+#### PHASE 6A — Tabletop Ritual Sensor Detection Requirements
+* Capture motion + orientation samples at `2 Hz` for demo stability:
+  * `accel_x`, `accel_y`, `accel_z`
+  * `gyro_x`, `gyro_y`, `gyro_z`
+  * `orientation_alpha`, `orientation_beta`, `orientation_gamma`
+  * `timestamp`, `device_orientation`, `screen_state` (if available)
+* Derive real-time metrics in `hj { }` before sending to the walker:
+  * `accel_norm = sqrt(ax^2 + ay^2 + az^2)`
+  * `gyro_norm = sqrt(gx^2 + gy^2 + gz^2)`
+  * `is_flat = abs(accel_norm - 9.81) < 0.7`
+  * `is_face_down = accel_z < -7.5` (calibrate once on-device)
+* Episode detector: **phone set down** (`face_down_stationary`):
+  * Require `is_flat == true`, `is_face_down == true`, and `gyro_norm < 0.08`
+  * Hold for `>= 8 seconds` (at least 16 consecutive samples at 2 Hz)
+  * Emit one episode event with confidence and sample window IDs
+* Episode detector: **phone picked up** (`pickup_transition`):
+  * Valid only when `focus_mode_active == true`
+  * Trigger when `gyro_norm > 0.35` or `abs(delta(accel_norm)) > 1.2` for 2+ consecutive samples
+  * Confirm orientation is no longer flat within 2 seconds (`abs(accel_z) < 6.5`)
+* Episode detector: **left building geofence** (`geofence_exit`) for location-enabled demo:
+  * Poll location every `10-15 sec`, only keep samples with `accuracy_m <= 40`
+  * Define building center (`lat`, `lng`) and radius `R` (start with `R = 120m`)
+  * Exit rule: `distance_from_center > R + max(accuracy_m, 20)` for 2 consecutive samples
+  * Anti-flap hysteresis: re-enter only when `distance_from_center <= R - 15`
+
+#### PHASE 6B — Backend Setup Requirements (InsForge + Backboard.ai)
+* Keep all raw telemetry and deterministic episodes in InsForge; keep cross-session habit memory in Backboard.ai.
+* Required InsForge tables for demo backend:
+  * `sensor_events`: raw sensor rows + derived flags
+  * `episode_log`: normalized episode records (`face_down_stationary`, `pickup_transition`, `geofence_exit`)
+  * `action_log`: all suggested/executed actions + result status
+  * `user_patterns`: compact scorecard (`accept_rate`, `last_seen`, `confidence`)
+  * `conversation_notes`: optional text/transcript snippets captured during focus mode
+  * `user_integrations`: encrypted tokens/webhook configs for external automations
+* Recommended fields:
+  * `sensor_events`: `id`, `user_id`, `sensor_type`, `payload_json`, `derived_json`, `ts`
+  * `episode_log`: `id`, `user_id`, `episode_type`, `start_ts`, `end_ts`, `confidence`, `context_json`
+  * `action_log`: `id`, `user_id`, `episode_id`, `action_type`, `action_payload`, `status`, `result_json`, `ts`
+  * `conversation_notes`: `id`, `user_id`, `episode_id`, `text`, `entities_json`, `ts`
+* Required indexes:
+  * `sensor_events(user_id, ts)`
+  * `episode_log(user_id, end_ts)`
+  * `action_log(user_id, ts)`
+  * `conversation_notes(user_id, ts)`
+* Backboard.ai memory design (agent "long-term brain"):
+  * Namespace `ritual_patterns`: learned confidence for set-down -> pickup ritual
+  * Namespace `geofence_patterns`: office exit patterns by weekday/time
+  * Namespace `conversation_commitments`: extracted "follow-up promises" and outcomes
+* Backboard.ai write policy:
+  * Write after each episode completion with action outcome
+  * Write acceptance/rejection feedback after every suggestion
+  * Write compact summary at end of focus mode (`what happened`, `what user accepted`)
+* Backboard.ai read policy:
+  * Read before decision step (`runCycle`) to pull recent pattern summaries
+  * Read before external action execution to personalize defaults (home route, preferred reminder time, preferred food link)
+
+#### PHASE 6C — Agent Decision and Action Requirements
+* Implement one backend decision loop in the walker/agent class:
+  * `collect current episode + context`
+  * `fetch Backboard memory + InsForge recent history`
+  * `compute confidence`
+  * `if confidence >= threshold and auto_mode -> execute action`
+  * `else -> suggest action and wait for user response`
+  * `persist outcome to InsForge + Backboard`
+* Keep confidence transparent in demo UI:
+  * show `confidence_score`
+  * show `top memory reasons` used in the decision
+  * show whether decision came from `rule`, `memory`, or `both`
+
+#### PHASE 6D — Easy and Feasible Automations for Demo
+* **Easy (recommended): Google Calendar follow-up event**
+  * Trigger: `pickup_transition` ends focus conversation mode
+  * Input: optional `conversation_notes.text`
+  * Agent step: extract task/time with `by llm()` and create event draft payload
+  * Backend step: call InsForge edge function `create_calendar_event`
+  * Log event ID and status in `action_log`
+* **Easy fallback: Todoist task + Slack/Discord webhook summary**
+  * Trigger: same as above
+  * Action: create "next action" task and post summary to team channel
+* **Geofence mundane automation (feasible in hackathon): leave building -> lunch reorder prompt**
+  * Trigger: `geofence_exit` between `11:30-13:30`
+  * Action: call simple webhook (`Pipedream`/`Zapier`/custom endpoint) that returns a one-tap deep link to preferred food app/cart
+  * UX: send local notification, user confirms with one tap, then open deep link
+  * Note: avoid direct card-charging APIs in demo; use confirm-and-open flow for reliability
+
+#### PHASE 6E — Winning Pitch Runbook (2 minutes)
+* Step 1: Place phone face-down for 8-10 sec. Show detected `face_down_stationary`.
+* Step 2: Agent enters focus mode and starts memory-backed observation.
+* Step 3: Add one short conversation note ("Need follow-up with Alex tomorrow at 10").
+* Step 4: Pick up phone. Show detected `pickup_transition`.
+* Step 5: Agent proposes (or auto-runs) Google Calendar follow-up event.
+* Step 6: Show live InsForge rows (`episode_log`, `action_log`) and Backboard memory summary update.
+* Step 7: Optional second flow: trigger geofence exit simulation and show lunch reorder prompt.
+* Step 8: End with confidence increase across repetitions ("learns from your routine").
 
 ## 8. Appendix A — Jac Walker Agent Example
 
