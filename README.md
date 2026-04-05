@@ -707,4 +707,18 @@ with entry {
 | Backboard.ai API access during hackathon. | Implement local fallback: store patterns in Jac's auto-persisted nodes + InsForge. |
 | Samsung Galaxy S23 APK sideloading requires USB debugging enabled. | Enable developer mode + USB debugging before the hackathon starts. |
 | Demo location might not trigger real GPS rules. | Implement "Simulate Sensor" button (Task 6.6) as mandatory fallback. |
-| API calls from mobile may have CORS issues. | InsForge/Backboard should support CORS; test API calls early. | jachacks
+| API calls from mobile may have CORS issues. | InsForge/Backboard should support CORS; test API calls early. |
+
+## Note: sample-pwa vs sensor-agent
+
+The repository contains two implementations of the same "Sensor Agent" application:
+
+- `sample-pwa/` — the Jac source version (see `sample-pwa/main.jac`). This is a Jac `hj { }` codespace app that compiles to a JS PWA and is wrapped with Capacitor.
+- `sensor-agent/` — a React + TypeScript + Vite port (see `sensor-agent/src/App.tsx` and `sensor-agent/src/services/*`). It implements the same UI and behavior but with modular TypeScript services and a Vite build flow.
+
+Key differences: source language (`.jac` vs TypeScript), build flow (`jac build` → Capacitor vs Vite), and the TS app exposes richer sensor-service modules. Functionally they are the same Sensor Agent UI/logic and can be considered two representations of the same app.
+
+If you prefer a single canonical source, choose one of the following:
+1. Use `sample-pwa/` (Jac) as the canonical source and remove or archive `sensor-agent/`.
+2. Use `sensor-agent/` (TypeScript) as the canonical app and keep `sample-pwa/` as an example port.
+3. Keep both and add a small README in each folder explaining the relationship and recommended workflow.

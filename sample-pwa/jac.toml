@@ -10,10 +10,16 @@ app_name = "Hijac"
 
 [dependencies.npm]
 jac-client-node = "1.0.7"
+"@insforge/sdk" = "latest"
 "@capacitor/core" = "^8.3.0"
 "@capacitor/device" = "^8.0.2"
 "@capacitor/haptics" = "^8.0.2"
 "@capacitor/motion" = "^8.0.0"
+"@capacitor/camera" = "^8.0.2"
+"@capacitor/geolocation" = "^8.2.0"
+"@capgo/capacitor-barometer" = "^8.0.10"
+"@capgo/capacitor-compass" = "^8.1.11"
+"@mozartec/capacitor-microphone" = "^7.1.0"
 
 [dependencies.npm.dev]
 "@jac-client/dev-deps" = "2.0.0"
