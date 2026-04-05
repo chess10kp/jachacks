@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
-import { SensorService, type SensorData, type SensorConfig } from './services/SensorService';
+import { SensorService, type SensorData } from './services/SensorService';
 import { AIAgent, type AgentAction, type AgentConfig } from './services/AIAgent';
 import './App.css';
 
@@ -56,13 +56,6 @@ function App() {
   };
 
   const startTracking = async () => {
-    await SensorService.requestPermissions();
-    
-    const sensorConfig: SensorConfig = {
-      accelerometerInterval: 100,
-      gyroscopeInterval: 100
-    };
-
     const agentConfig: AgentConfig = {
       apiEndpoint: '',
       motionThreshold: 2.5,
@@ -70,25 +63,25 @@ function App() {
       autoAct: true
     };
 
+    setIsTracking(true);
+    setAgentState({ isRunning: true, decisions: [], lastMotion: null });
     AIAgent.configure(agentConfig);
     AIAgent.start(handleAction);
 
-    SensorService.startAllSensors(sensorConfig, (data) => {
-      console.log('Sensor data received:', data);
+    SensorService.startAllSensors({ accelerometerInterval: 100, gyroscopeInterval: 100 }, (data) => {
       if (data.motion) motionRef.current = data.motion;
       if (data.barometer) barometerRef.current = data.barometer;
       if (data.compass) compassRef.current = data.compass;
       if (data.geolocation) geolocationRef.current = data.geolocation;
-      if (data.proximity) proximityRef.current = data.proximity;
       
       setSensorData({
-        motion: motionRef.current,
-        barometer: barometerRef.current,
-        compass: compassRef.current,
-        geolocation: data.geolocation || sensorData.geolocation,
-        pedometer: data.pedometer || sensorData.pedometer,
-        proximity: data.proximity || sensorData.proximity,
-        device: data.device || sensorData.device
+        motion: data.motion,
+        barometer: data.barometer || barometerRef.current,
+        compass: data.compass || compassRef.current,
+        geolocation: data.geolocation || geolocationRef.current,
+        pedometer: null,
+        proximity: data.proximity,
+        device: data.device
       });
 
       if (data.motion) {
@@ -97,21 +90,25 @@ function App() {
           rotationRate: data.motion.rotationRate,
           timestamp: data.motion.timestamp
         });
-        setAgentState(AIAgent.getState());
       }
+      setAgentState(AIAgent.getState());
     });
-
-    setIsTracking(true);
   };
 
   const stopTracking = () => {
     SensorService.stopAllSensors();
-    AIAgent.stop();
     setIsTracking(false);
-    motionRef.current = null;
-    barometerRef.current = null;
-    compassRef.current = null;
-    geolocationRef.current = null;
+    setSensorData({
+      motion: null,
+      barometer: null,
+      compass: null,
+      geolocation: null,
+      pedometer: null,
+      proximity: null,
+      device: null,
+      camera: null
+    });
+    setAgentState({ isRunning: false, decisions: [], lastMotion: null });
   };
 
   return (
