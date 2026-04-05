@@ -709,6 +709,7 @@ cl {
         [mealOrderStatus, setMealOrderStatus] = useState("");
         [showVoiceInputUi, setShowVoiceInputUi] = useState(False);
         [voiceInputSecondsLeft, setVoiceInputSecondsLeft] = useState(0);
+        [showSmsFallbackButton, setShowSmsFallbackButton] = useState(False);
         [lastTtsError, setLastTtsError] = useState("");
         [showVoiceReplay, setShowVoiceReplay] = useState(False);
         [predictionLoadingStep, setPredictionLoadingStep] = useState(0);
@@ -1281,17 +1282,59 @@ cl {
 
         def unlock_audio_output -> None {
             if ttsUnlockedRef.current {
+                print("unlock_audio_output: Already unlocked");
                 return;
             }
 
-            warm_audio = Reflect.construct(Audio, ["data:audio/mpeg;base64,SUQzAwAAAAAA"]);
-            warm_audio.play().then(lambda -> None {
-                warm_audio.pause();
-                warm_audio.src = "";
-                ttsUnlockedRef.current = True;
-            }).catch(lambda -> None {
+            print("unlock_audio_output: Attempting to unlock audio context");
+
+            # First try to resume AudioContext if available (Web Audio API)
+            try {
+                audio_context = Reflect.get(window, "AudioContext") or Reflect.get(window, "webkitAudioContext");
+                if audio_context {
+                    ctx = Reflect.construct(audio_context, []);
+                    if ctx.state == "suspended" {
+                        ctx.resume().then(lambda -> None {
+                            print("unlock_audio_output: AudioContext resumed");
+                        }).catch(lambda -> None { ; });
+                    }
+                }
+            } except Exception as e {
                 ;
-            });
+            }
+
+            warm_candidates = ["/order.mp3", "./order.mp3", "capacitor://localhost/order.mp3"];
+
+            def try_warm(idx: int) -> None {
+                if idx >= warm_candidates.length {
+                    print("unlock_audio_output: All warm candidates exhausted");
+                    return;
+                }
+
+                warm_src = warm_candidates[idx];
+                print("unlock_audio_output: Trying warm candidate " + String(idx) + ": " + warm_src);
+                try {
+                    warm_audio = Reflect.construct(Audio, [warm_src]);
+                    warm_audio.muted = True;
+                    warm_audio.volume = 0;
+                    warm_audio.play().then(lambda -> None {
+                        warm_audio.pause();
+                        warm_audio.currentTime = 0;
+                        warm_audio.muted = False;
+                        warm_audio.volume = 1;
+                        ttsUnlockedRef.current = True;
+                        print("unlock_audio_output: Successfully unlocked with " + warm_src);
+                    }).catch(lambda err: Any -> None {
+                        print("unlock_audio_output: Warm candidate " + warm_src + " failed: " + String(err));
+                        try_warm(idx + 1);
+                    });
+                } except Exception as e {
+                    print("unlock_audio_output: Exception with " + warm_src + ": " + String(e));
+                    try_warm(idx + 1);
+                }
+            }
+
+            try_warm(0);
         }
 
         def speak_browser_fallback(text: str) -> bool {
@@ -1315,8 +1358,12 @@ cl {
 
         def play_local_audio(file_name: str) -> None {
             if not file_name or file_name.trim().length == 0 {
+                print("play_local_audio: No file name provided");
                 return;
             }
+
+            print("play_local_audio: Attempting to play " + file_name);
+            Haptics.impact({"style": ImpactStyle.Light}).catch(lambda -> None { ; });
 
             origin = "";
             try {
@@ -1335,6 +1382,7 @@ cl {
 
             def try_play_candidate(idx: int) -> None {
                 if idx >= candidates.length {
+                    print("play_local_audio: All candidates failed for " + file_name);
                     setTtsPlaying(False);
                     setShowVoiceReplay(True);
                     setLastTtsError("audio_play_failed_" + file_name);
@@ -1346,19 +1394,34 @@ cl {
                     try_play_candidate(idx + 1);
                     return;
                 }
+                
+                print("play_local_audio: Trying candidate " + String(idx) + ": " + src);
+                
                 try {
                     audio = Reflect.construct(Audio, [src]);
+                    audio.preload = "auto";
+                    audio.playsInline = True;
+                    audio.muted = False;
+                    audio.volume = 1;
                     ttsAudioRef.current = audio;
                     setTtsPlaying(True);
                     audio.onended = lambda -> None {
+                        print("play_local_audio: Playback ended for " + file_name);
                         setTtsPlaying(False);
                     };
+                    audio.onerror = lambda e: Any -> None {
+                        print("play_local_audio: Error event for " + src + ": " + String(e));
+                        try_play_candidate(idx + 1);
+                    };
                     audio.play().then(lambda -> None {
+                        print("play_local_audio: Successfully playing " + src);
                         setShowVoiceReplay(False);
-                    }).catch(lambda -> None {
+                    }).catch(lambda err: Any -> None {
+                        print("play_local_audio: play() rejected for " + src + ": " + String(err));
                         try_play_candidate(idx + 1);
                     });
                 } except Exception as e {
+                    print("play_local_audio: Exception creating audio for " + src + ": " + String(e));
                     try_play_candidate(idx + 1);
                 }
             }
@@ -1366,6 +1429,7 @@ cl {
             try {
                 try_play_candidate(0);
             } except Exception as e {
+                print("play_local_audio: Fatal error: " + String(e));
                 setShowVoiceReplay(True);
                 setLastTtsError("audio_init_failed_" + file_name);
             }
@@ -1386,12 +1450,54 @@ cl {
             play_local_audio(file_name);
         }
 
-        def open_sms_invite_after_llm -> None {
-            sms_body = "you wanna join me for a quick bite rn?";
-            sms_number = emergency_contact();
-            sms_url = "sms:" + sms_number + "?body=" + encodeURIComponent(sms_body);
-            window.open(sms_url, "_self");
+        def force_play_audio_sequence -> None {
+            unlock_audio_output();
+            setLastTtsError("forced_audio_sequence");
+            setMealOrderStatus("Playing prompt audio...");
+            play_local_audio("order.mp3");
+            setTimeout(lambda -> None {
+                setMealOrderStatus("Playing confirmation audio...");
+                queue_local_audio("spicy-chicken-bowl.mp3");
+            }, 2200);
         }
+
+    def open_sms_invite_after_llm -> None {
+        sms_body = "you wanna join me for a quick bite rn?";
+        sms_number = emergency_contact();
+        sms_url = "sms:" + sms_number + "?body=" + encodeURIComponent(sms_body);
+        did_open = False;
+
+        # Method 1: Create and click anchor element (most reliable for SMS on mobile)
+        try {
+            link = document.createElement("a");
+            link.href = sms_url;
+            link.style.display = "none";
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            did_open = True;
+            print("SMS: Opened via anchor click");
+        } except Exception as e {
+            print("SMS: Anchor click failed: " + String(e));
+            did_open = False;
+        }
+
+        if not did_open {
+            try {
+                window.location.href = sms_url;
+                did_open = True;
+                print("SMS: Opened via location.href");
+            } except Exception as e {
+                print("SMS: location.href failed: " + String(e));
+                did_open = False;
+            }
+        }
+
+        if not did_open {
+            setShowSmsFallbackButton(True);
+            setEatingPredictionError("SMS app did not open automatically. Tap the SMS button below.");
+        }
+    }
 
         def speak_assistant_prompt(text: str) -> None {
             if not text or text.trim().length == 0 {
@@ -1401,20 +1507,36 @@ cl {
             setLastTtsError("");
             unlock_audio_output();
 
-            if text.trim().toLowerCase() == "do you wnat to place your usual order?" {
-                Haptics.impact({"style": ImpactStyle.Light});
+            normalized = text.trim().toLowerCase();
+            
+            # Check for order prompt (with typo match for backwards compatibility)
+            if normalized == "do you wnat to place your usual order?" or normalized == "do you want to place your usual order?" {
+                print("TTS: Playing order.mp3 for order prompt");
+                Haptics.impact({"style": ImpactStyle.Light}).catch(lambda -> None { ; });
                 play_local_audio("order.mp3");
                 return;
             }
 
+            # Check for spicy chicken bowl response
+            if normalized.indexOf("spicy chicken bowl") >= 0 {
+                print("TTS: Playing spicy-chicken-bowl.mp3");
+                Haptics.impact({"style": ImpactStyle.Light}).catch(lambda -> None { ; });
+                play_local_audio("spicy-chicken-bowl.mp3");
+                return;
+            }
+
+            # Try browser speech synthesis fallback
             used_browser = speak_browser_fallback(text.trim());
             if used_browser {
+                print("TTS: Used browser speech synthesis");
                 setShowVoiceReplay(False);
                 return;
             }
 
-            setShowVoiceReplay(False);
-            Haptics.impact({"style": ImpactStyle.Medium});
+            # No audio available
+            print("TTS: No audio method available for: " + text);
+            setShowVoiceReplay(True);
+            Haptics.impact({"style": ImpactStyle.Medium}).catch(lambda -> None { ; });
             setDecisions(lambda prev: list -> list {
                 return prev.slice(-9).concat([{
                     "type": "notify",
@@ -1423,6 +1545,45 @@ cl {
                     "source": "tts"
                 }]);
             });
+        }
+
+        def test_local_audio -> None {
+            unlock_audio_output();
+            setMealOrderStatus("Audio test started...");
+            setLastTtsError("audio_test_invoked");
+            Haptics.impact({"style": ImpactStyle.Heavy}).catch(lambda -> None { ; });
+            play_local_audio("order.mp3");
+            setTimeout(lambda -> None {
+                queue_local_audio("spicy-chicken-bowl.mp3");
+                setMealOrderStatus("Audio test second clip queued");
+            }, 2200);
+        }
+
+        def debug_audio_ping -> None {
+            now = Reflect.construct(Date, []);
+            setEatingPredictionError("Audio ping clicked at " + now.toLocaleTimeString());
+            setLastTtsError("audio_ping_clicked");
+            Haptics.impact({"style": ImpactStyle.Heavy}).catch(lambda -> None { ; });
+            play_local_audio("order.mp3");
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "notify",
+                    "message": "Audio ping fired",
+                    "priority": 1,
+                    "source": "audio_debug"
+                }]);
+            });
+        }
+
+        def open_sms_fallback -> None {
+            sms_body = "you wanna join me for a quick bite rn?";
+            sms_number = emergency_contact();
+            sms_url = "sms:" + sms_number + "?body=" + encodeURIComponent(sms_body);
+            try {
+                window.location.href = sms_url;
+            } except Exception as e {
+                setEatingPredictionError("Could not open SMS app. Please send manually.");
+            }
         }
         def predict_next_eating_destination -> None {
             if isPredictingDestination {
@@ -1436,6 +1597,7 @@ cl {
             setMealOrderStatus("");
             setShowVoiceInputUi(False);
             setVoiceInputSecondsLeft(0);
+            setShowSmsFallbackButton(False);
             setLastTtsError("");
             setShowVoiceReplay(False);
 
@@ -1488,51 +1650,49 @@ cl {
                             setEatingPrediction(pred);
                             setIsPredictingDestination(False);
 
-                            if pred.destination_name == "foo bar" or pred.destination_name == "Campus Cafe" {
-                                setMealOrderStatus("Assistant: do you wnat to place your usual order?");
-                                speak_assistant_prompt("do you wnat to place your usual order?");
+                            setMealOrderStatus("Assistant: do you wnat to place your usual order?");
+                            speak_assistant_prompt("do you wnat to place your usual order?");
 
-                                setTimeout(
-                                    lambda -> None {
-                                        setShowVoiceInputUi(True);
-                                        setVoiceInputSecondsLeft(4);
+                            setTimeout(
+                                lambda -> None {
+                                    setShowVoiceInputUi(True);
+                                    setVoiceInputSecondsLeft(4);
 
-                                        voiceTickRef = {"id": None};
-                                        voiceTickRef.id = setInterval(
-                                            lambda -> None {
-                                                setVoiceInputSecondsLeft(lambda prev: int -> int {
-                                                    next_left = prev - 1;
-                                                    if next_left <= 0 {
-                                                        if voiceTickRef.id {
-                                                            clearInterval(voiceTickRef.id);
-                                                            voiceTickRef.id = None;
-                                                        }
-                                                        setShowVoiceInputUi(False);
-                                                        setMealOrderStatus("Sure! placed your usual spicy chicken bowl.");
-                                                        setShowVoiceReplay(False);
-                                                        queue_local_audio("spicy-chicken-bowl.mp3");
-                                                        setDecisions(lambda prev2: list -> list {
-                                                            return prev2.slice(-9).concat([{
-                                                                "type": "notify",
-                                                                "message": "Sure! placed your usual spicy chicken bowl.",
-                                                                "priority": 1,
-                                                                "source": "meal_order"
-                                                            }]);
-                                                        });
-                                                        setTimeout(lambda -> None {
-                                                            open_sms_invite_after_llm();
-                                                        }, 300);
-                                                        return 0;
+                                    voiceTickRef = {"id": None};
+                                    voiceTickRef.id = setInterval(
+                                        lambda -> None {
+                                            setVoiceInputSecondsLeft(lambda prev: int -> int {
+                                                next_left = prev - 1;
+                                                if next_left <= 0 {
+                                                    if voiceTickRef.id {
+                                                        clearInterval(voiceTickRef.id);
+                                                        voiceTickRef.id = None;
                                                     }
-                                                    return next_left;
-                                                });
-                                            },
-                                            1000
-                                        );
-                                    },
-                                    1200
-                                );
-                            }
+                                                    setShowVoiceInputUi(False);
+                                                    setMealOrderStatus("Sure! placed your usual spicy chicken bowl.");
+                                                    setShowVoiceReplay(False);
+                                                    queue_local_audio("spicy-chicken-bowl.mp3");
+                                                    setDecisions(lambda prev2: list -> list {
+                                                        return prev2.slice(-9).concat([{
+                                                            "type": "notify",
+                                                            "message": "Sure! placed your usual spicy chicken bowl.",
+                                                            "priority": 1,
+                                                            "source": "meal_order"
+                                                        }]);
+                                                    });
+                                                    setTimeout(lambda -> None {
+                                                        open_sms_invite_after_llm();
+                                                    }, 300);
+                                                    return 0;
+                                                }
+                                                return next_left;
+                                            });
+                                        },
+                                        1000
+                                    );
+                                },
+                                1200
+                            );
 
                             setDecisions(lambda prev: list -> list {
                                 return prev.slice(-9).concat([{
@@ -2967,7 +3127,7 @@ cl {
         # --- card base style ---
         glassCard = {
             "marginBottom": "16px",
-            "padding": "22px 24px",
+            "padding": "0px 24px",
             "borderRadius": "20px",
             "background": "var(--hj-surface)",
             "border": "1px solid var(--hj-border)",
@@ -3040,6 +3200,44 @@ cl {
                         Tap to hear voice prompt
                     </button>;
             }
+            smsFallbackButton = None;
+            if showSmsFallbackButton {
+                smsFallbackButton =
+                    <button
+                        onClick={open_sms_fallback}
+                        style={{
+                            "marginTop": "12px",
+                            "padding": "10px 16px",
+                            "fontSize": "12px",
+                            "fontWeight": "600",
+                            "borderRadius": "10px",
+                            "border": "1px solid var(--hj-amber-border)",
+                            "background": "var(--hj-amber-light)",
+                            "color": "var(--hj-amber)",
+                            "cursor": "pointer",
+                            "fontFamily": "var(--hj-font-body)"
+                        }}
+                    >
+                        Open Messages
+                    </button>;
+            }
+            testAudioButton =
+                <button
+                    onClick={test_local_audio}
+                    style={{
+                        "marginTop": "12px",
+                        "padding": "8px 14px",
+                        "fontSize": "11px",
+                        "fontWeight": "600",
+                        "borderRadius": "8px",
+                        "border": "1px solid var(--hj-border)",
+                        "background": "var(--hj-surface-raised)",
+                        "color": "var(--hj-text)",
+                        "cursor": "pointer"
+                    }}
+                >
+                    Test Local Audio
+                </button>;
             ttsErrorView = None;
             if lastTtsError and lastTtsError.trim().length > 0 {
                 ttsErrorView =
@@ -3109,6 +3307,7 @@ cl {
                     {orderStatusView}
                     {voiceInputView}
                     {replayVoiceButton}
+                    {smsFallbackButton}
                 </div>;
         }
 
@@ -3239,7 +3438,7 @@ cl {
                             "color": "var(--hj-text)",
                             "fontFamily": "var(--hj-font-display)",
                             "fontStyle": "italic"
-                        }}>HiJac</h1>
+                        }}>Hijac</h1>
                         <div style={{
                             "width": "6px",
                             "height": "6px",
@@ -3272,7 +3471,7 @@ cl {
                                 "letterSpacing": "0.01em"
                             }}
                         >
-                            {"Predicting..." if isPredictingDestination else "Predict Meal"}
+                            {"Predicting..." if isPredictingDestination else "v"}
                         </button>
                         <span style={{
                             "fontSize": "9px",
@@ -3296,8 +3495,7 @@ cl {
                     "display": "flex",
                     "flexDirection": "column",
                     "justifyContent": "center",
-                    "width": "100%",
-                    "maxWidth": "560px",
+                    "width": "360px",
                     "margin": "0 auto",
                     "padding": "32px 24px 48px 24px"
                 }}>
@@ -3348,16 +3546,8 @@ cl {
                                     "letterSpacing": "-0.03em",
                                     "fontFamily": "var(--hj-font-display)"
                                 }}>
-                                    Create Workflow
+                                    Hijac your day!
                                 </h2>
-                                <p style={{
-                                    "fontSize": "15px",
-                                    "color": "var(--hj-text-secondary)",
-                                    "margin": "0",
-                                    "lineHeight": "1.6"
-                                }}>
-                                    Describe what you want to monitor.
-                                </p>
                             </div>
 
                             <div style={{
@@ -3402,7 +3592,6 @@ cl {
                                     "display": "flex",
                                     "justifyContent": "flex-end",
                                     "alignItems": "center",
-                                    "background": "#F5F2EE"
                                 }}>
                                     <button
                                         onClick={create_workflow}
