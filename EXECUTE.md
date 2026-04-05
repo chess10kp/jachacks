@@ -1,0 +1,764 @@
+# Hijac Demo Execution Commands
+
+This document provides curl/HTTP commands that can be invoked from Jac code via `shell{}` or adapted for the `hj {}` HTTP client codespace. Use these to trigger demo scenarios without modifying the Jac codebase directly.
+
+## Credentials
+
+# InsForge
+
+---
+
+## Type Definitions
+
+### InsForge Types
+
+```typescript
+// Sensor Event
+interface SensorEvent {
+  user_id: string;           // "demo_user"
+  sensor_type: string;       // "motion_2hz" | "geolocation" | "barometer"
+  payload_json: {
+    accel_x: number;         // m/s²
+    accel_y: number;
+    accel_z: number;         // ~-9.8 when face-down
+    gyro_x: number;          // rad/s
+    gyro_y: number;
+    gyro_z: number;
+    timestamp?: number;      // epoch ms
+  };
+  derived_json: {
+    accel_norm: number;      // sqrt(x²+y²+z²)
+    gyro_norm: number;       // sqrt(x²+y²+z²)
+    is_flat: boolean;        // accel_norm ≈ 9.8
+    is_face_down: boolean;   // accel_z < -7.5
+    focus_mode_active: boolean;
+  };
+  ts?: string;               // ISO8601, auto-generated if omitted
+}
+
+// Episode
+interface Episode {
+  user_id: string;
+  episode_type: "face_down_stationary" | "pickup_transition" | "geofence_exit";
+  start_ts: string;          // ISO8601
+  end_ts: string;            // ISO8601
+  confidence: number;        // 0.0 - 1.0
+  context_json: {
+    duration_sec?: number;
+    avg_gyro_norm?: number;
+    accel_spike?: number;
+    prior_episode?: string;
+    detector_version: string;
+    source: string;
+  };
+}
+
+// Action
+interface Action {
+  user_id: string;
+  episode_id: number;        // FK to episode_log.id
+  action_type: "create_calendar_event" | "send_notification" | "open_maps" | "set_reminder";
+  action_payload: Record<string, any>;
+  status: "suggested" | "accepted" | "rejected" | "executed" | "failed";
+  result_json: {
+    decision_source: "rule" | "memory" | "both";
+    confidence_score: number;
+    memory_reason?: string;
+    rule_match?: boolean;
+    user_response?: string;
+    execution_success?: boolean;
+  };
+  ts?: string;
+}
+
+// User Patterns
+interface UserPatterns {
+  user_id: string;
+  accept_rate: number;       // 0.0 - 1.0
+  last_seen: string;         // ISO8601
+  confidence: number;        // 0.0 - 1.0
+}
+
+// User Rule
+interface UserRule {
+  user_id: string;
+  name: string;
+  condition: {
+    sensor_type: string;
+    near_location?: { lat: number; lng: number; radius_m: number };
+    time_after?: string;     // "HH:MM"
+    days?: string[];         // ["MON", "TUE", ...]
+  };
+  action_type: string;
+  action_params: Record<string, any>;
+  enabled: boolean;
+}
+```
+
+### Backboard Types
+
+```typescript
+// Memory Write
+interface MemoryWrite {
+  content: string;           // Include namespace tag: "[ritual_patterns] ..."
+  metadata: {
+    namespace: "ritual_patterns" | "geofence_patterns" | "conversation_commitments";
+    user_id: string;
+    confidence?: string;
+  };
+}
+
+// Memory Search
+interface MemorySearch {
+  query: string;             // "user:demo_user focus ritual"
+  limit?: number;            // default 5
+}
+
+// Thread Message
+interface ThreadMessage {
+  content: string;           // Query or observation
+  stream: boolean;           // false for sync response
+  memory: "Auto" | "Readonly"; // Auto = save + retrieve, Readonly = retrieve only
+}
+
+// Memory Response
+interface MemoryResult {
+  id: string;
+  content: string;
+  score: number;             // similarity score
+  created_at: string;
+}
+```
+
+---
+
+## InsForge REST API Commands
+
+Base pattern:
+```bash
+curl -X METHOD "${INSFORGE_BASE_URL}/api/database/records/{table}" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d 'JSON_BODY'
+```
+
+### 1. Log Sensor Event
+
+```bash
+curl -X POST "${INSFORGE_BASE_URL}/api/database/records/sensor_events" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "sensor_type": "motion_2hz",
+    "payload_json": {
+      "accel_x": 0.02,
+      "accel_y": -0.01,
+      "accel_z": -9.78,
+      "gyro_x": 0.01,
+      "gyro_y": 0.00,
+      "gyro_z": 0.01
+    },
+    "derived_json": {
+      "accel_norm": 9.78,
+      "gyro_norm": 0.014,
+      "is_flat": true,
+      "is_face_down": true,
+      "focus_mode_active": true
+    }
+  }]'
+```
+
+**Expected Response:**
+```json
+[{
+  "id": "6",
+  "user_id": "demo_user",
+  "sensor_type": "motion_2hz",
+  "payload_json": {...},
+  "derived_json": {...},
+  "ts": "2026-04-05T07:00:00.000Z"
+}]
+```
+
+### 2. Log Episode (Face Down Stationary)
+
+```bash
+curl -X POST "${INSFORGE_BASE_URL}/api/database/records/episode_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_type": "face_down_stationary",
+    "start_ts": "2026-04-05T10:00:00Z",
+    "end_ts": "2026-04-05T10:25:00Z",
+    "confidence": 0.94,
+    "context_json": {
+      "duration_sec": 1500,
+      "avg_gyro_norm": 0.015,
+      "detector_version": "v1",
+      "source": "motion_pipeline"
+    }
+  }]'
+```
+
+### 3. Log Episode (Pickup Transition)
+
+```bash
+curl -X POST "${INSFORGE_BASE_URL}/api/database/records/episode_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_type": "pickup_transition",
+    "start_ts": "2026-04-05T10:25:00Z",
+    "end_ts": "2026-04-05T10:25:03Z",
+    "confidence": 0.92,
+    "context_json": {
+      "accel_spike": 8.5,
+      "gyro_spike": 1.8,
+      "prior_episode": "face_down_stationary",
+      "detector_version": "v1",
+      "source": "motion_pipeline"
+    }
+  }]'
+```
+
+### 4. Log Action (Suggested)
+
+```bash
+curl -X POST "${INSFORGE_BASE_URL}/api/database/records/action_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_id": 3,
+    "action_type": "create_calendar_event",
+    "action_payload": {
+      "title": "Follow up with Alex",
+      "start": "2026-04-05T11:00:00Z",
+      "duration_min": 30
+    },
+    "status": "suggested",
+    "result_json": {
+      "decision_source": "memory",
+      "confidence_score": 0.82,
+      "memory_reason": "user accepts follow-up reminders with person + time",
+      "rule_match": false
+    }
+  }]'
+```
+
+### 5. Update Action Status (Accept/Reject)
+
+```bash
+# Accept
+curl -X PATCH "${INSFORGE_BASE_URL}/api/database/records/action_log?id=eq.4" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '{
+    "status": "accepted",
+    "result_json": {
+      "decision_source": "memory",
+      "confidence_score": 0.82,
+      "user_response": "accepted",
+      "latency_ms": 1500
+    }
+  }'
+
+# Reject
+curl -X PATCH "${INSFORGE_BASE_URL}/api/database/records/action_log?id=eq.4" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '{
+    "status": "rejected",
+    "result_json": {
+      "decision_source": "memory",
+      "confidence_score": 0.82,
+      "user_response": "rejected",
+      "rejection_reason": "not now"
+    }
+  }'
+```
+
+### 6. Update User Patterns
+
+```bash
+curl -X PATCH "${INSFORGE_BASE_URL}/api/database/records/user_patterns?user_id=eq.demo_user" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '{
+    "accept_rate": 0.88,
+    "confidence": 0.80,
+    "last_seen": "2026-04-05T10:25:03Z"
+  }'
+```
+
+### 7. Query Recent Episodes
+
+```bash
+curl -X GET "${INSFORGE_BASE_URL}/api/database/records/episode_log?user_id=eq.demo_user&order=end_ts.desc&limit=5" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+```
+
+### 8. Query Active Rules
+
+```bash
+curl -X GET "${INSFORGE_BASE_URL}/api/database/records/user_rules?user_id=eq.demo_user&enabled=eq.true" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+```
+
+### 9. Query Backboard Config
+
+```bash
+curl -X GET "${INSFORGE_BASE_URL}/api/database/records/user_integrations?user_id=eq.demo_user&integration_type=eq.backboard" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+```
+
+---
+
+## Backboard.io API Commands
+
+Base pattern:
+```bash
+curl -X METHOD "${BACKBOARD_BASE_URL}/endpoint" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d 'JSON_BODY'
+```
+
+### 1. Write Memory
+
+```bash
+curl -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "[ritual_patterns] user:demo_user completed 25-min focus session, accepted calendar follow-up. Confidence: 0.88",
+    "metadata": {
+      "namespace": "ritual_patterns",
+      "user_id": "demo_user",
+      "confidence": "0.88"
+    }
+  }'
+```
+
+**Expected Response:**
+```json
+{
+  "success": true,
+  "message": "Memory added successfully",
+  "memory_id": "uuid-here",
+  "content": "[ritual_patterns] user:demo_user completed 25-min focus session..."
+}
+```
+
+### 2. Search Memory
+
+```bash
+curl -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories/search" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "user:demo_user focus ritual morning",
+    "limit": 5
+  }'
+```
+
+**Expected Response:**
+```json
+{
+  "memories": [
+    {
+      "id": "uuid",
+      "content": "[ritual_patterns] user:demo_user morning focus sessions...",
+      "score": 0.85,
+      "created_at": "2026-04-05T06:43:02"
+    }
+  ],
+  "total_count": 1
+}
+```
+
+### 3. List All Memories
+
+```bash
+curl -X GET "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}"
+```
+
+### 4. Send Thread Message (with Memory Recall)
+
+```bash
+# Readonly mode - retrieve memories without saving
+curl -X POST "${BACKBOARD_BASE_URL}/threads/${BACKBOARD_THREAD_ID}/messages" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "What do you remember about user:demo_user focus rituals and follow-up preferences?",
+    "stream": false,
+    "memory": "Readonly"
+  }'
+
+# Auto mode - retrieve and save new memories
+curl -X POST "${BACKBOARD_BASE_URL}/threads/${BACKBOARD_THREAD_ID}/messages" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "user:demo_user just completed a 25-minute focus session and accepted a calendar follow-up with Alex at 11am",
+    "stream": false,
+    "memory": "Auto"
+  }'
+```
+
+**Expected Response:**
+```json
+{
+  "role": "assistant",
+  "content": "I recall that demo_user has morning focus sessions lasting 20-30 minutes...",
+  "message_id": "uuid",
+  "status": "COMPLETED",
+  "metadata_": {
+    "retrieved_memories": [
+      {"id": "uuid", "score": 0.85, "memory": "..."}
+    ]
+  }
+}
+```
+
+### 5. Get Assistant Details
+
+```bash
+curl -X GET "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}"
+```
+
+### 6. Get Thread with Messages
+
+```bash
+curl -X GET "${BACKBOARD_BASE_URL}/threads/${BACKBOARD_THREAD_ID}" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}"
+```
+
+---
+
+## Demo Scenario Scripts
+
+### Scenario 1: Focus Ritual Complete Flow
+
+This simulates: phone placed face-down → 25 min passes → phone picked up → agent suggests action → user accepts
+
+```bash
+#!/bin/bash
+# Run from project root
+
+# 1. Log face-down sensor event
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/sensor_events" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "demo_user",
+    "sensor_type": "motion_2hz",
+    "payload_json": {"accel_x": 0.01, "accel_y": 0.00, "accel_z": -9.79, "gyro_x": 0.00, "gyro_y": 0.01, "gyro_z": 0.00},
+    "derived_json": {"accel_norm": 9.79, "gyro_norm": 0.01, "is_flat": true, "is_face_down": true, "focus_mode_active": true}
+  }]'
+
+# 2. Log face_down_stationary episode
+EPISODE_RESPONSE=$(curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/episode_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_type": "face_down_stationary",
+    "start_ts": "'$(date -u -d '-25 minutes' +%Y-%m-%dT%H:%M:%SZ)'",
+    "end_ts": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "confidence": 0.95,
+    "context_json": {"duration_sec": 1500, "avg_gyro_norm": 0.012, "detector_version": "v1", "source": "motion_pipeline"}
+  }]')
+EPISODE_ID=$(echo $EPISODE_RESPONSE | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+
+# 3. Query Backboard for decision context
+curl -s -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories/search" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "user:demo_user focus ritual preferences", "limit": 3}'
+
+# 4. Log pickup_transition episode
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/episode_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_type": "pickup_transition",
+    "start_ts": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "end_ts": "'$(date -u -d '+3 seconds' +%Y-%m-%dT%H:%M:%SZ)'",
+    "confidence": 0.93,
+    "context_json": {"accel_spike": 8.5, "gyro_spike": 1.6, "prior_episode": "face_down_stationary", "detector_version": "v1", "source": "motion_pipeline"}
+  }]'
+
+# 5. Log suggested action
+ACTION_RESPONSE=$(curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/action_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_id": '$EPISODE_ID',
+    "action_type": "create_calendar_event",
+    "action_payload": {"title": "Follow up with Alex", "start": "'$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)'"},
+    "status": "suggested",
+    "result_json": {"decision_source": "memory", "confidence_score": 0.85, "memory_reason": "user accepts follow-ups with person + time"}
+  }]')
+ACTION_ID=$(echo $ACTION_RESPONSE | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+
+# 6. User accepts
+curl -s -X PATCH "${INSFORGE_BASE_URL}/api/database/records/action_log?id=eq.${ACTION_ID}" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "accepted", "result_json": {"decision_source": "memory", "confidence_score": 0.85, "user_response": "accepted"}}'
+
+# 7. Write outcome to Backboard
+curl -s -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "[ritual_patterns] user:demo_user completed focus ritual, accepted calendar follow-up. Pattern reinforced.",
+    "metadata": {"namespace": "ritual_patterns", "user_id": "demo_user", "confidence": "0.88"}
+  }'
+
+# 8. Update user patterns
+curl -s -X PATCH "${INSFORGE_BASE_URL}/api/database/records/user_patterns?user_id=eq.demo_user" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"accept_rate": 0.88, "confidence": 0.82, "last_seen": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}'
+
+echo "Focus ritual flow complete!"
+```
+
+### Scenario 2: Geofence Exit (Leave Office)
+
+```bash
+#!/bin/bash
+
+# 1. Log geolocation sensor event (leaving office)
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/sensor_events" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "demo_user",
+    "sensor_type": "geolocation",
+    "payload_json": {"lat": 37.7749, "lng": -122.4194, "accuracy": 10, "speed": 1.2},
+    "derived_json": {"near_office": false, "exited_geofence": true, "time_of_day": "evening"}
+  }]'
+
+# 2. Log geofence_exit episode
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/episode_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_type": "geofence_exit",
+    "start_ts": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "end_ts": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "confidence": 0.98,
+    "context_json": {"geofence_name": "office", "exit_direction": "south", "detector_version": "v1", "source": "geolocation_pipeline"}
+  }]'
+
+# 3. Query rule match
+curl -s -X GET "${INSFORGE_BASE_URL}/api/database/records/user_rules?user_id=eq.demo_user&enabled=eq.true&action_type=eq.open_maps" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+
+# 4. Query Backboard for geofence patterns
+curl -s -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories/search" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "user:demo_user geofence office leave navigation", "limit": 3}'
+
+# 5. Log auto-executed action (high confidence from rule + memory)
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/action_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_id": null,
+    "action_type": "open_maps",
+    "action_payload": {"destination": "home", "mode": "driving"},
+    "status": "executed",
+    "result_json": {"decision_source": "both", "confidence_score": 0.95, "rule_match": true, "memory_reason": "auto-accepted navigation 3/3 times", "execution_success": true}
+  }]'
+
+echo "Geofence exit flow complete!"
+```
+
+### Scenario 3: Rejected Action (Learn from Rejection)
+
+```bash
+#!/bin/bash
+
+# 1. Log suggested action that will be rejected
+ACTION_RESPONSE=$(curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/action_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_id": null,
+    "action_type": "send_notification",
+    "action_payload": {"title": "Lunch break?", "body": "You have been working for 3 hours"},
+    "status": "suggested",
+    "result_json": {"decision_source": "rule", "confidence_score": 0.55, "rule_match": true}
+  }]')
+ACTION_ID=$(echo $ACTION_RESPONSE | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+
+# 2. User rejects
+curl -s -X PATCH "${INSFORGE_BASE_URL}/api/database/records/action_log?id=eq.${ACTION_ID}" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "rejected", "result_json": {"decision_source": "rule", "confidence_score": 0.55, "user_response": "rejected", "rejection_reason": "busy"}}'
+
+# 3. Write negative signal to Backboard
+curl -s -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "[ritual_patterns] user:demo_user rejected lunch break notification during work hours. Lower confidence for personal reminders during focus time.",
+    "metadata": {"namespace": "ritual_patterns", "user_id": "demo_user", "confidence": "0.45", "signal": "negative"}
+  }'
+
+# 4. Update user patterns (lower accept rate)
+curl -s -X PATCH "${INSFORGE_BASE_URL}/api/database/records/user_patterns?user_id=eq.demo_user" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"accept_rate": 0.82, "confidence": 0.75, "last_seen": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}'
+
+echo "Rejection learning flow complete!"
+```
+
+---
+
+## Jac Integration Patterns
+
+### Pattern 1: HTTP Request from Jac
+
+```jac
+# Using shell to make curl requests
+can log_sensor_event(payload: dict) -> dict {
+    import:py subprocess;
+    
+    cmd = f'''curl -s -X POST "https://ww8eiidv.us-east.insforge.app/api/database/records/sensor_events" \
+        -H "Authorization: Bearer {ANON_KEY}" \
+        -H "Content-Type: application/json" \
+        -d '[{json.dumps(payload)}]' ''';
+    
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True);
+    return json.loads(result.stdout);
+}
+```
+
+### Pattern 2: Memory-Assisted Decision
+
+```jac
+# Query Backboard for decision context
+can get_decision_context(user_id: str, query: str) -> list {
+    import:py subprocess;
+    import:py json;
+    
+    cmd = f'''curl -s -X POST "https://app.backboard.io/api/assistants/67f63b37-0648-4e96-b084-1c4464bd350b/memories/search" \
+        -H "X-API-Key: {API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d '{{"query": "user:{user_id} {query}", "limit": 5}}' ''';
+    
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True);
+    data = json.loads(result.stdout);
+    return data.get("memories", []);
+}
+```
+
+### Pattern 3: Agent Decision Loop
+
+```jac
+walker agent_cycle {
+    can decide with episode entry {
+        # 1. Get episode context
+        episode_type = here.episode_type;
+        user_id = here.user_id;
+        
+        # 2. Query memories
+        memories = get_decision_context(user_id, f"{episode_type} preferences");
+        
+        # 3. Query rules
+        rules = query_rules(user_id, episode_type);
+        
+        # 4. Compute confidence
+        memory_signal = memories[0].score if memories else 0.0;
+        rule_match = len(rules) > 0;
+        confidence = compute_confidence(memory_signal, rule_match);
+        
+        # 5. Decide and log
+        if confidence >= 0.8 and auto_mode {
+            execute_action(action);
+            log_action(user_id, action, "executed", confidence);
+        } else {
+            suggest_action(action);
+            log_action(user_id, action, "suggested", confidence);
+        }
+        
+        # 6. Write outcome to memory
+        write_outcome(user_id, episode_type, action, confidence);
+    }
+}
+```
+
+---
+
+## Quick Verification Queries
+
+### Check InsForge Data
+
+```bash
+# Count all records
+curl -s "${INSFORGE_BASE_URL}/api/database/records/sensor_events?select=id&limit=1" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" -I | grep X-Total-Count
+
+curl -s "${INSFORGE_BASE_URL}/api/database/records/episode_log?select=id&limit=1" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" -I | grep X-Total-Count
+
+curl -s "${INSFORGE_BASE_URL}/api/database/records/action_log?select=id&limit=1" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" -I | grep X-Total-Count
+
+# Recent episodes
+curl -s "${INSFORGE_BASE_URL}/api/database/records/episode_log?order=end_ts.desc&limit=5" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+
+# Recent actions
+curl -s "${INSFORGE_BASE_URL}/api/database/records/action_log?order=ts.desc&limit=5" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+```
+
+### Check Backboard Data
+
+```bash
+# List all memories
+curl -s "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}"
+
+# Get thread history
+curl -s "${BACKBOARD_BASE_URL}/threads/${BACKBOARD_THREAD_ID}" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}"
+```
+
+---
+
+## Environment Setup
+
+Add to your shell profile or source before running:
+
