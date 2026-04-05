@@ -22,3 +22,5 @@ rad.json
 TestResults.xml
 .env
 opencode.json
+
+.jac/
