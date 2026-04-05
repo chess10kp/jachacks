@@ -90,6 +90,297 @@ walker MotionDecisionWalker {
 }
 
 cl {
+    def insforge_base_url -> str {
+        return "https://ww8eiidv.us-east.insforge.app";
+    }
+
+    def insforge_anon_key -> str {
+        return "ik_90dd3cbd3d6b4e9620bb549a7156b840";
+    }
+
+    def backboard_base_url -> str {
+        return "https://app.backboard.io/api";
+    }
+
+    def backboard_key -> str {
+        return "espr_F4OSIbpFh9A1iTnxHLOus3kjTMl25h3Wk4awDuUZyuA";
+    }
+
+    def backboard_assistant_id -> str {
+        return "67f63b37-0648-4e96-b084-1c4464bd350b";
+    }
+
+    def office_geofence -> dict {
+        return {
+            "name": "office",
+            "lat": 37.774900,
+            "lng": -122.419400,
+            "radius_m": 120
+        };
+    }
+
+    def emergency_contact -> str {
+        return "+17344449383";
+    }
+
+    def emergency_contact_name -> str {
+        return "Emergency Contact";
+    }
+
+    def fall_detection_thresholds -> dict {
+        return {
+            "impact_accel_norm": 25.0,  # m/s² (3G+)
+            "stillness_gyro_norm": 0.1,  # rad/s
+            "stillness_duration_ms": 3000,  # 3 seconds of stillness
+            "orientation_change_deg": 60.0,  # degrees from upright
+            "confidence_threshold": 0.90,
+            "countdown_seconds": 30
+        };
+    }
+
+    def now_iso -> str {
+        return Reflect.construct(Date, []).toISOString();
+    }
+
+    def to_num(value: Any, fallback: float = 0.0) -> float {
+        num = Number(value);
+        return fallback if Number.isNaN(num) else num;
+    }
+
+    def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float {
+        to_rad = lambda deg: float -> float {
+            return deg * (Math.PI / 180.0);
+        };
+        d_lat = to_rad(lat2 - lat1);
+        d_lng = to_rad(lng2 - lng1);
+        a = (Math.sin(d_lat / 2.0) ** 2) + Math.cos(to_rad(lat1)) * Math.cos(to_rad(lat2)) * (Math.sin(d_lng / 2.0) ** 2);
+        c = 2.0 * Math.atan2(Math.sqrt(a), Math.sqrt(1.0 - a));
+        return 6371000.0 * c;
+    }
+
+    async def insforge_insert(table_name: str, row: dict) -> dict {
+        base_url = insforge_base_url();
+        anon_key = insforge_anon_key();
+
+        if not base_url or not anon_key {
+            return {"ok": False, "reason": "missing_insforge_env"};
+        }
+
+        try {
+            res = await fetch(
+                base_url + "/api/database/records/" + table_name,
+                {
+                    "method": "POST",
+                    "headers": {
+                        "Authorization": "Bearer " + anon_key,
+                        "Content-Type": "application/json",
+                        "Prefer": "return=representation"
+                    },
+                    "body": JSON.stringify([row])
+                }
+            );
+
+            if not res.ok {
+                body_text = await res.text();
+                print("InsForge insert failed", table_name, res.status, body_text);
+                return {"ok": False, "status": res.status};
+            }
+
+            data = await res.json().catch(lambda -> Any { return []; });
+            return {
+                "ok": True,
+                "record": (data[0] if data and data.length and data[0] else None)
+            };
+        } except Exception as e {
+            print("InsForge insert error", table_name, e);
+            return {"ok": False, "reason": "network_error"};
+        }
+    }
+
+    async def log_sensor_event(user_id: str, sensor_type: str, payload: dict, derived: dict) -> dict {
+        return await insforge_insert("sensor_events", {
+            "user_id": user_id,
+            "sensor_type": sensor_type,
+            "payload_json": payload,
+            "derived_json": derived,
+            "ts": now_iso()
+        });
+    }
+
+    async def log_episode(
+        user_id: str,
+        episode_type: str,
+        start_ts: str,
+        end_ts: str,
+        confidence: float,
+        context_json: dict
+    ) -> dict {
+        return await insforge_insert("episode_log", {
+            "user_id": user_id,
+            "episode_type": episode_type,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "confidence": confidence,
+            "context_json": context_json
+        });
+    }
+
+    async def backboard_read(query: str) -> dict {
+        try {
+            base_url = backboard_base_url();
+            api_key = backboard_key();
+            assistant_id = backboard_assistant_id();
+            if not base_url or not api_key or not assistant_id {
+                return {"ok": False, "reason": "missing_backboard_env", "memories": []};
+            }
+            res = await fetch(
+                base_url + "/assistants/" + assistant_id + "/memories/search",
+                {
+                    "method": "POST",
+                    "headers": {
+                        "X-API-Key": api_key,
+                        "Content-Type": "application/json"
+                    },
+                    "body": JSON.stringify({
+                        "query": query,
+                        "limit": 3
+                    })
+                }
+            );
+
+            if not res.ok {
+                body_text = await res.text();
+                print("backboard_read failed", res.status, body_text);
+                return {"ok": False, "memories": []};
+            }
+
+            data = await res.json().catch(lambda -> Any { return {}; });
+            return {
+                "ok": True,
+                "memories": (data.memories if data and data.memories else [])
+            };
+        } except Exception as e {
+            print("backboard_read error", e);
+            return {"ok": False, "memories": []};
+        }
+    }
+
+    async def backboard_write(namespace: str, content: str, metadata: dict = {}) -> dict {
+        base_url = backboard_base_url();
+        api_key = backboard_key();
+        assistant_id = backboard_assistant_id();
+
+        if not base_url or not api_key or not assistant_id {
+            return {"ok": False, "reason": "missing_backboard_env"};
+        }
+
+        try {
+            res = await fetch(
+                base_url + "/assistants/" + assistant_id + "/memories",
+                {
+                    "method": "POST",
+                    "headers": {
+                        "X-API-Key": api_key,
+                        "Content-Type": "application/json"
+                    },
+                    "body": JSON.stringify({
+                        "content": "[" + namespace + "] " + content,
+                        "metadata": Object.assign({
+                            "namespace": namespace,
+                            "user_id": "demo_user"
+                        }, metadata)
+                    })
+                }
+            );
+
+            if not res.ok {
+                body_text = await res.text();
+                print("backboard_write failed", res.status, body_text);
+                return {"ok": False};
+            }
+
+            return {"ok": True};
+        } except Exception as e {
+            print("backboard_write error", e);
+            return {"ok": False};
+        }
+    }
+
+    async def log_motion_from_walker(user_id: str, motion_data: Any, decision: dict) -> None {
+        if not motion_data or not motion_data.acceleration {
+            return;
+        }
+
+        accel = motion_data.acceleration;
+        gyro = motion_data.rotationRate if motion_data and motion_data.rotationRate else {"alpha": 0, "beta": 0, "gamma": 0};
+
+        accel_x = to_num(accel.x);
+        accel_y = to_num(accel.y);
+        accel_z = to_num(accel.z);
+        gyro_x = to_num(gyro.alpha);
+        gyro_y = to_num(gyro.beta);
+        gyro_z = to_num(gyro.gamma);
+
+        accel_norm = (accel_x * accel_x + accel_y * accel_y + accel_z * accel_z) ** 0.5;
+        gyro_norm = (gyro_x * gyro_x + gyro_y * gyro_y + gyro_z * gyro_z) ** 0.5;
+
+        await log_sensor_event(
+            user_id,
+            "motion_2hz",
+            {
+                "accel_x": accel_x,
+                "accel_y": accel_y,
+                "accel_z": accel_z,
+                "gyro_x": gyro_x,
+                "gyro_y": gyro_y,
+                "gyro_z": gyro_z,
+                "timestamp": (motion_data.timestamp if motion_data and motion_data.timestamp else Date.now())
+            },
+            {
+                "accel_norm": accel_norm,
+                "gyro_norm": gyro_norm,
+                "is_flat": accel_norm >= 9.0 and accel_norm <= 10.8,
+                "is_face_down": accel_z <= -7.5,
+                "focus_mode_active": accel_z <= -7.5 and gyro_norm < 0.25,
+                "walker_source": "MotionDecisionWalker",
+                "decision_priority": (decision.priority if decision and decision.priority else 0)
+            }
+        );
+
+        episode_type = None;
+        context_json = None;
+        if accel_z <= -7.5 and gyro_norm < 0.25 {
+            episode_type = "face_down_stationary";
+            context_json = {
+                "duration_sec": 0,
+                "avg_gyro_norm": gyro_norm,
+                "detector_version": "v1",
+                "source": "walker_motion_detector"
+            };
+        } elif decision and decision.priority and decision.priority > 0 and accel_norm >= 10.8 {
+            episode_type = "pickup_transition";
+            context_json = {
+                "accel_spike": accel_norm,
+                "gyro_spike": gyro_norm,
+                "prior_episode": "face_down_stationary",
+                "detector_version": "v1",
+                "source": "walker_motion_detector"
+            };
+        }
+
+        if episode_type {
+            ts_iso = now_iso();
+            await log_episode(
+                user_id,
+                episode_type,
+                ts_iso,
+                ts_iso,
+                0.9,
+                context_json
+            );
+        }
+    }
+
     async def decide_motion_with_walker(
         motion_data: Any,
         config: dict,
@@ -102,19 +393,22 @@ cl {
             use_llm=use_llm
         );
 
-        if resp and resp.length and resp[0] {
-            return resp[0];
-        }
-        if resp and resp.report and resp.report.length and resp.report[0] {
-            return resp.report[0];
-        }
-
-        return {
+        decision = {
             "type": "log",
             "message": "No decision returned",
             "priority": 0,
             "source": "rule"
         };
+
+        if resp and resp.length and resp[0] {
+            decision = resp[0];
+        }
+        if resp and resp.report and resp.report.length and resp.report[0] {
+            decision = resp.report[0];
+        }
+
+        await log_motion_from_walker("demo_user", motion_data, decision);
+        return decision;
     }
 
     def:pub app -> JsxElement {
@@ -163,6 +457,9 @@ cl {
 
         decisionLoopRef = useRef(None);
         lastMotionRef = useRef(None);
+        userIdRef = useRef("demo_user");
+        geofenceInsideRef = useRef(None);
+        lastGeofenceExitTsRef = useRef(0);
         accelSubRef = useRef(None);
         barometerSubRef = useRef(None);
         compassSubRef = useRef(None);
@@ -170,6 +467,15 @@ cl {
         motionIntervalRef = useRef(None);
         isTrackingRef = useRef(False);  # Persist tracking state for listener callbacks
         motionListenerAttached = useRef(False);  # Track if motion listener is already attached
+
+        # Fall detection state
+        fallImpactTsRef = useRef(0);  # Timestamp of detected impact spike
+        fallStillnessStartRef = useRef(0);  # When stillness began after impact
+        fallStillnessCountRef = useRef(0);  # Consecutive stillness readings
+        fallOrientationChangeRef = useRef(False);  # Orientation changed from upright
+        fallCountdownRef = useRef(None);  # Countdown timer interval
+        [fallCountdown, setFallCountdown] = useState(0);  # Countdown seconds remaining (0 = no countdown)
+        [fallDetected, setFallDetected] = useState(False);  # Whether fall is confirmed
 
         agentConfig = {
             "apiEndpoint": "",
@@ -180,6 +486,393 @@ cl {
 
         def gen_rule_id -> str {
             return "rule-" + String(Date.now()) + "-" + String(Math.floor(Math.random() * 1000));
+        }
+
+        async def detect_geofence_exit(geo: dict) -> None {
+            if not geo {
+                return;
+            }
+
+            geofence = office_geofence();
+
+            lat = to_num(geo.lat);
+            lng = to_num(geo.lng);
+            distance_m = haversine_m(lat, lng, geofence.lat, geofence.lng);
+            is_inside = distance_m <= geofence.radius_m;
+
+            if geofenceInsideRef.current is None {
+                geofenceInsideRef.current = is_inside;
+                return;
+            }
+
+            was_inside = geofenceInsideRef.current;
+            geofenceInsideRef.current = is_inside;
+
+            if was_inside and not is_inside {
+                now_ms = Date.now();
+                if now_ms - lastGeofenceExitTsRef.current < 45000 {
+                    return;
+                }
+                lastGeofenceExitTsRef.current = now_ms;
+
+                speed = to_num(geo.speed);
+                payload = {
+                    "lat": lat,
+                    "lng": lng,
+                    "accuracy": to_num(geo.accuracy),
+                    "speed": speed,
+                    "distance_from_office_m": Math.round(distance_m)
+                };
+                derived = {
+                    "near_office": False,
+                    "exited_geofence": True,
+                    "geofence_name": geofence.name,
+                    "time_of_day": Reflect.construct(Date, []).getHours(),
+                    "source": "walker_geofence_detector"
+                };
+
+                await log_sensor_event(userIdRef.current, "geolocation", payload, derived);
+
+                ts_iso = now_iso();
+                await log_episode(
+                    userIdRef.current,
+                    "geofence_exit",
+                    ts_iso,
+                    ts_iso,
+                    0.98,
+                    {
+                        "geofence_name": geofence.name,
+                        "distance_from_center_m": Math.round(distance_m),
+                        "speed_mps": speed,
+                        "detector_version": "v1",
+                        "source": "walker_geofence_detector"
+                    }
+                );
+
+                await backboard_write(
+                    "geofence_patterns",
+                    "user:" + userIdRef.current + " exited " + geofence.name + " geofence at " + ts_iso,
+                    {
+                        "event": "geofence_exit",
+                        "distance_from_center_m": String(Math.round(distance_m))
+                    }
+                );
+
+                setDecisions(lambda prev: list -> list {
+                    return prev.slice(-9).concat([{
+                        "type": "log",
+                        "message": "Geofence exit detected: " + geofence.name,
+                        "priority": 1,
+                        "source": "geofence"
+                    }]);
+                });
+            }
+        }
+
+        async def log_fall_event(
+            confidence: float,
+            accel_norm: float,
+            gyro_norm: float,
+            stillness_duration_ms: int
+        ) -> None {
+            ts_iso = now_iso();
+            
+            # Log to episode_log table
+            await log_episode(
+                userIdRef.current,
+                "fall_detected",
+                ts_iso,
+                ts_iso,
+                confidence,
+                {
+                    "accel_norm_at_impact": accel_norm,
+                    "gyro_norm_at_stillness": gyro_norm,
+                    "stillness_duration_ms": stillness_duration_ms,
+                    "detector_version": "v1",
+                    "source": "fall_detector"
+                }
+            );
+
+            # Write to Backboard safety_events memory
+            await backboard_write(
+                "safety_events",
+                "user:" + userIdRef.current + " fall detected at " + ts_iso + " confidence=" + String(confidence),
+                {
+                    "event": "fall_detected",
+                    "confidence": String(confidence),
+                    "accel_norm": String(accel_norm)
+                }
+            );
+        }
+
+        async def log_emergency_call_action(contact_number: str, contact_name: str) -> None {
+            ts_iso = now_iso();
+
+            # Log to action_log table
+            await insforge_insert("action_log", {
+                "user_id": userIdRef.current,
+                "action_type": "call_emergency_contact",
+                "target": contact_number,
+                "context_json": {
+                    "contact_name": contact_name,
+                    "trigger": "fall_detected",
+                    "countdown_completed": True
+                },
+                "ts": ts_iso
+            });
+
+            # Write to Backboard safety_events memory
+            await backboard_write(
+                "safety_events",
+                "user:" + userIdRef.current + " emergency call placed to " + contact_name + " at " + ts_iso,
+                {
+                    "event": "emergency_call",
+                    "contact": contact_number
+                }
+            );
+        }
+
+        async def execute_emergency_call -> None {
+            contact = emergency_contact();
+            contact_name = emergency_contact_name();
+
+            print("EMERGENCY: Initiating call to " + contact_name + " at " + contact);
+
+            # Log the action first
+            await log_emergency_call_action(contact, contact_name);
+
+            # Place the call using tel: URI - multiple approaches for reliability
+            tel_uri = "tel:" + contact;
+            print("EMERGENCY: Using tel URI: " + tel_uri);
+
+            # Method 1: Create and click an anchor element (most reliable on mobile)
+            try {
+                link = document.createElement("a");
+                link.href = tel_uri;
+                link.style.display = "none";
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                print("EMERGENCY: Call initiated via anchor click");
+            } except Exception as e {
+                print("EMERGENCY: Anchor method failed: " + String(e));
+
+                # Method 2: Direct location change
+                try {
+                    window.location.href = tel_uri;
+                    print("EMERGENCY: Call initiated via location.href");
+                } except Exception as e2 {
+                    print("EMERGENCY: location.href failed: " + String(e2));
+
+                    # Method 3: window.open
+                    try {
+                        window.open(tel_uri, "_system");
+                        print("EMERGENCY: Call initiated via window.open");
+                    } except Exception as e3 {
+                        print("EMERGENCY: All call methods failed!");
+                    }
+                }
+            }
+
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "trigger",
+                    "message": "Emergency call placed to " + contact_name,
+                    "priority": 3,
+                    "source": "fall_detector"
+                }]);
+            });
+
+            # Reset fall detection state
+            setFallDetected(False);
+            setFallCountdown(0);
+        }
+
+        def cancel_fall_countdown -> None {
+            if fallCountdownRef.current {
+                clearInterval(fallCountdownRef.current);
+                fallCountdownRef.current = None;
+            }
+            setFallCountdown(0);
+            setFallDetected(False);
+
+            # Reset fall detection state
+            fallImpactTsRef.current = 0;
+            fallStillnessStartRef.current = 0;
+            fallStillnessCountRef.current = 0;
+            fallOrientationChangeRef.current = False;
+
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "log",
+                    "message": "Fall alert cancelled by user",
+                    "priority": 1,
+                    "source": "fall_detector"
+                }]);
+            });
+        }
+
+        def start_fall_countdown(confidence: float, accel_norm: float, gyro_norm: float, stillness_ms: int) -> None {
+            thresholds = fall_detection_thresholds();
+            countdown_secs = thresholds.countdown_seconds;
+
+            setFallDetected(True);
+            setFallCountdown(countdown_secs);
+
+            # Log the fall event
+            log_fall_event(confidence, accel_norm, gyro_norm, stillness_ms);
+
+            # Haptic feedback to alert user
+            Haptics.impact({"style": ImpactStyle.Heavy}).catch(lambda -> None { ; });
+
+            # Start countdown timer
+            fallCountdownRef.current = setInterval(
+                lambda -> None {
+                    setFallCountdown(lambda prev: int -> int {
+                        if prev <= 1 {
+                            # Countdown finished, place emergency call
+                            clearInterval(fallCountdownRef.current);
+                            fallCountdownRef.current = None;
+                            execute_emergency_call();
+                            return 0;
+                        }
+                        # Haptic tick every 5 seconds
+                        if prev % 5 == 0 {
+                            Haptics.impact({"style": ImpactStyle.Medium}).catch(lambda -> None { ; });
+                        }
+                        return prev - 1;
+                    });
+                },
+                1000
+            );
+
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "trigger",
+                    "message": "Fall detected! Emergency call in " + String(countdown_secs) + "s",
+                    "priority": 3,
+                    "source": "fall_detector"
+                }]);
+            });
+        }
+
+        def detect_fall(accel_x: float, accel_y: float, accel_z: float, gyro_x: float, gyro_y: float, gyro_z: float) -> None {
+            # Don't process if countdown is already active
+            if fallCountdown > 0 {
+                return;
+            }
+
+            thresholds = fall_detection_thresholds();
+            now_ms = Date.now();
+
+            accel_norm = (accel_x * accel_x + accel_y * accel_y + accel_z * accel_z) ** 0.5;
+            gyro_norm = (gyro_x * gyro_x + gyro_y * gyro_y + gyro_z * gyro_z) ** 0.5;
+
+            # Calculate orientation - angle from upright (z-axis should be ~9.8 when upright)
+            # If accel_z is significantly different from accel_norm, device is tilted
+            orientation_from_upright = 0.0;
+            if accel_norm > 0.1 {
+                cos_angle = accel_z / accel_norm;
+                # Clamp to valid range for acos
+                if cos_angle > 1.0 {
+                    cos_angle = 1.0;
+                }
+                if cos_angle < -1.0 {
+                    cos_angle = -1.0;
+                }
+                orientation_from_upright = Math.acos(cos_angle) * (180.0 / Math.PI);
+            }
+
+            impact_ts = fallImpactTsRef.current;
+
+            # Stage 1: Detect impact spike (only if we don't have a recent impact already)
+            if accel_norm > thresholds.impact_accel_norm {
+                # Only register new impact if no impact in last 500ms (debounce multiple spikes)
+                if impact_ts == 0 or (now_ms - impact_ts) > 500 {
+                    fallImpactTsRef.current = now_ms;
+                    fallStillnessCountRef.current = 0;
+                    fallStillnessStartRef.current = 0;
+                    fallOrientationChangeRef.current = False;
+                    print("Fall detection: Impact spike detected, accel_norm=" + String(accel_norm));
+                }
+                return;
+            }
+
+            # Stage 2: After impact, check for stillness
+            if impact_ts > 0 and (now_ms - impact_ts) < 10000 {
+                time_since_impact = now_ms - impact_ts;
+
+                # Within 10 seconds of impact, check for stillness
+                if gyro_norm < thresholds.stillness_gyro_norm {
+                    if fallStillnessStartRef.current == 0 {
+                        fallStillnessStartRef.current = now_ms;
+                        print("Fall detection: Stillness started, gyro_norm=" + String(gyro_norm));
+                    }
+                    fallStillnessCountRef.current = fallStillnessCountRef.current + 1;
+
+                    stillness_duration = now_ms - fallStillnessStartRef.current;
+
+                    # Stage 3: Check orientation change
+                    if orientation_from_upright > thresholds.orientation_change_deg {
+                        if not fallOrientationChangeRef.current {
+                            print("Fall detection: Orientation change detected, angle=" + String(orientation_from_upright) + " deg");
+                        }
+                        fallOrientationChangeRef.current = True;
+                    }
+
+                    # Log progress every second
+                    if fallStillnessCountRef.current % 60 == 0 {
+                        print("Fall detection: Stillness=" + String(stillness_duration) + "ms, orientation=" + String(orientation_from_upright) + "deg, orientationOK=" + String(fallOrientationChangeRef.current));
+                    }
+
+                    # All conditions met?
+                    if stillness_duration >= thresholds.stillness_duration_ms and fallOrientationChangeRef.current {
+                        # Calculate confidence based on conditions
+                        confidence = 0.85;
+                        if stillness_duration > 5000 {
+                            confidence = confidence + 0.05;
+                        }
+                        if orientation_from_upright > 90.0 {
+                            confidence = confidence + 0.05;
+                        }
+                        if confidence > 1.0 {
+                            confidence = 1.0;
+                        }
+
+                        if confidence >= thresholds.confidence_threshold {
+                            print("Fall confirmed! confidence=" + String(confidence) + ", stillness=" + String(stillness_duration) + "ms");
+
+                            # Reset detection state (countdown will handle the rest)
+                            fallImpactTsRef.current = 0;
+                            fallStillnessStartRef.current = 0;
+                            fallStillnessCountRef.current = 0;
+                            fallOrientationChangeRef.current = False;
+
+                            # Start countdown
+                            start_fall_countdown(
+                                confidence,
+                                accel_norm,
+                                gyro_norm,
+                                stillness_duration
+                            );
+                        }
+                    }
+                } else {
+                    # Movement detected, reset stillness tracking
+                    if fallStillnessStartRef.current > 0 {
+                        print("Fall detection: Movement detected, resetting stillness. gyro_norm=" + String(gyro_norm));
+                    }
+                    fallStillnessStartRef.current = 0;
+                    fallStillnessCountRef.current = 0;
+                }
+            } elif impact_ts > 0 and (now_ms - impact_ts) >= 10000 {
+                # Too much time passed since impact, reset
+                print("Fall detection: Impact timeout (10s), resetting");
+                fallImpactTsRef.current = 0;
+                fallStillnessStartRef.current = 0;
+                fallStillnessCountRef.current = 0;
+                fallOrientationChangeRef.current = False;
+            }
         }
 
         async def execute_action(action: dict, reason: str = "") -> None {
@@ -555,15 +1248,36 @@ cl {
                             return;
                         }
 
+                        memory_query = "user:" + userIdRef.current + " motion routine geofence patterns";
+                        memory_result = await backboard_read(memory_query);
+                        memory_count = memory_result.memories.length if memory_result and memory_result.memories else 0;
+
                         decision = await decide_motion_with_walker(
                             lastMotionRef.current,
                             agentConfig,
                             True
                         );
+
+                        if decision and memory_count > 0 {
+                            decision.message = decision.message + " | memory hits: " + String(memory_count);
+                            decision.source = "memory+walker";
+                        }
+
                         if decision.priority > 0 {
                             await handleAction(decision);
                         }
                         await evaluate_rules_and_act(lastMotionRef.current, "decision-loop");
+
+                        if decision and decision.priority > 0 {
+                            await backboard_write(
+                                "ritual_patterns",
+                                "user:" + userIdRef.current + " decision-loop action=" + decision.type + " priority=" + String(decision.priority),
+                                {
+                                    "signal": "decision_loop",
+                                    "source": "walker"
+                                }
+                            );
+                        }
                     }
                     runDecision();
                 },
@@ -687,6 +1401,9 @@ cl {
 
                         lastMotionRef.current = motionRef.current;
 
+                        # Fall detection - check every motion event
+                        detect_fall(ax, ay, az, alpha, beta, gamma);
+
                         decide_motion_with_walker(
                             motionRef.current,
                             agentConfig,
@@ -756,6 +1473,7 @@ cl {
                             "speed": pos.coords.speed if pos.coords.speed else 0,
                             "accuracy": pos.coords.accuracy if pos.coords.accuracy else 0
                         };
+                        detect_geofence_exit(geolocationRef.current);
                         emit_data();
                     }
                 }
@@ -772,6 +1490,7 @@ cl {
                             "speed": pos.coords.speed if pos.coords.speed else 0,
                             "accuracy": pos.coords.accuracy if pos.coords.accuracy else 0
                         };
+                        detect_geofence_exit(geolocationRef.current);
                         emit_data();
                     }
                 }
@@ -913,6 +1632,73 @@ cl {
                     <div style={{"color": "#94a3b8"}}>Total: {decisions.length}</div>
                     <div>
                         Last: {decisions[decisions.length - 1].message}
+                    </div>
+                </div>;
+        }
+
+        # Fall detection countdown overlay
+        fallOverlay = None;
+        if fallCountdown > 0 {
+            fallOverlay =
+                <div style={{
+                    "position": "fixed",
+                    "top": "0",
+                    "left": "0",
+                    "right": "0",
+                    "bottom": "0",
+                    "background": "rgba(220, 38, 38, 0.95)",
+                    "display": "flex",
+                    "flexDirection": "column",
+                    "alignItems": "center",
+                    "justifyContent": "center",
+                    "zIndex": "9999",
+                    "color": "#fff",
+                    "padding": "24px"
+                }}>
+                    <div style={{
+                        "fontSize": "24px",
+                        "fontWeight": "700",
+                        "marginBottom": "16px",
+                        "textAlign": "center"
+                    }}>
+                        FALL DETECTED
+                    </div>
+                    <div style={{
+                        "fontSize": "72px",
+                        "fontWeight": "800",
+                        "marginBottom": "24px"
+                    }}>
+                        {fallCountdown}
+                    </div>
+                    <div style={{
+                        "fontSize": "16px",
+                        "marginBottom": "32px",
+                        "textAlign": "center",
+                        "maxWidth": "280px"
+                    }}>
+                        Emergency call will be placed in {fallCountdown} seconds
+                    </div>
+                    <button
+                        onClick={cancel_fall_countdown}
+                        style={{
+                            "padding": "16px 48px",
+                            "fontSize": "18px",
+                            "fontWeight": "700",
+                            "background": "#fff",
+                            "color": "#dc2626",
+                            "border": "none",
+                            "borderRadius": "12px",
+                            "cursor": "pointer"
+                        }}
+                    >
+                        I'M OK - CANCEL
+                    </button>
+                    <div style={{
+                        "marginTop": "24px",
+                        "fontSize": "14px",
+                        "opacity": "0.8"
+                    }}>
+                        Calling: {emergency_contact_name()}
                     </div>
                 </div>;
         }
@@ -1300,6 +2086,7 @@ cl {
                         {decisionsView}
                     </section>
                 </main>
+                {fallOverlay}
             </div>;
     }
 }
