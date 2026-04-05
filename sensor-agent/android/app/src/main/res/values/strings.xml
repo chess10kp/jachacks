@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SensorAgent</string>
+    <string name="title_activity_main">SensorAgent</string>
+    <string name="package_name">com.sensoragent.app</string>
+    <string name="custom_url_scheme">com.sensoragent.app</string>
+</resources>
