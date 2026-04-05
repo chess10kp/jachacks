@@ -1,0 +1,45 @@
+[project]
+name = "hijac-sample"
+version = "1.0.0"
+description = "Hijac Sensor Dashboard - Sample PWA"
+entry-point = "main.jac"
+
+[plugins.client.mobile]
+app_id = "com.hijac.app"
+app_name = "Hijac"
+
+[dependencies.npm]
+jac-client-node = "1.0.7"
+"@capacitor/core" = "^8.3.0"
+"@capacitor/device" = "^8.0.2"
+"@capacitor/haptics" = "^8.0.2"
+"@capacitor/motion" = "^8.0.0"
+
+[dependencies.npm.dev]
+"@jac-client/dev-deps" = "2.0.0"
+
+
+# Desktop target configuration (Tauri)
+[desktop]
+name = "hijac-sample"
+identifier = "hijac.sample"
+version = "1.0.0"
+
+[desktop.window]
+title = "hijac-sample"
+width = 1200
+height = 800
+min_width = 800
+min_height = 600
+resizable = true
+fullscreen = false
+
+[desktop.platforms]
+windows = true
+macos = true
+linux = true
+
+[desktop.features]
+system_tray = false
+auto_update = false
+notifications = false

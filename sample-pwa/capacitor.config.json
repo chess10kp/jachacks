@@ -1,0 +1,8 @@
+{
+  "appId": "com.jac.app",
+  "appName": "Jac App",
+  "webDir": ".jac/client/dist",
+  "server": {
+    "iosScheme": "capacitor"
+  }
+}
