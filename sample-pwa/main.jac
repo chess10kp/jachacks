@@ -158,6 +158,40 @@ cl {
         return 6371000.0 * c;
     }
 
+    async def fetch_weather(lat: float, lng: float) -> dict {
+        api_key = Reflect.get(window, "VITE_OPENWEATHERMAP_API_KEY") or "";
+        if not api_key or api_key == "your-openweathermap-api-key-here" {
+            print("Weather: No API key configured");
+            return {"ok": False, "reason": "no_api_key"};
+        }
+        
+        try {
+            url = "https://api.openweathermap.org/data/2.5/weather?lat="
+                + String(lat) + "&lon=" + String(lng)
+                + "&appid=" + api_key + "&units=metric";
+            
+            res = await fetch(url);
+            if not res.ok {
+                return {"ok": False, "reason": "api_error"};
+            }
+            
+            data = await res.json();
+            return {
+                "ok": True,
+                "temp": data.main.temp,
+                "feels_like": data.main.feels_like,
+                "humidity": data.main.humidity,
+                "description": data.weather[0].description if data.weather and data.weather[0] else "",
+                "icon": data.weather[0].icon if data.weather and data.weather[0] else "",
+                "wind_speed": data.wind.speed if data.wind else 0,
+                "city": data.name or "Unknown"
+            };
+        } except Exception as e {
+            print("Weather fetch error:", e);
+            return {"ok": False, "reason": "network_error"};
+        }
+    }
+
     async def insforge_insert(table_name: str, row: dict) -> dict {
         base_url = insforge_base_url();
         anon_key = insforge_anon_key();
@@ -491,6 +525,13 @@ cl {
         
         # The correct passcode - in production this would be user-configured
         CORRECT_PASSCODE = "1234";
+        
+        # Weather data state
+        [weatherData, setWeatherData] = useState(None);
+        
+        # Hardcoded location coordinates
+        HARDCODED_LAT = 42.2929877;
+        HARDCODED_LNG = -83.7166082;
 
         agentConfig = {
             "apiEndpoint": "",
@@ -923,8 +964,9 @@ cl {
 
         def start_demo_timer -> None {
             # Docstring removed
-            print("DEMO: Starting 6-second demo timer");
+            print("DEMO: Starting 6-second demo timer (overlay shows last 3 seconds)");
             
+            # Start at 6, but overlay only shows when <= 3
             setDemoCountdown(6);
             
             # Haptic feedback
@@ -944,11 +986,13 @@ cl {
                             execute_emergency_call();
                             return 0;
                         }
-                        # Vibrate each second
-                        try {
-                            Haptics.vibrate({"duration": 100});
-                        } except Exception as e {
-                            ;
+                        # Vibrate each second when visible (last 3 seconds)
+                        if prev <= 4 {
+                            try {
+                                Haptics.vibrate({"duration": 100});
+                            } except Exception as e {
+                                ;
+                            }
                         }
                         return prev - 1;
                     });
@@ -1765,14 +1809,21 @@ cl {
                 lambda pos: Any -> None {
                     if pos and pos.coords {
                         geolocationRef.current = {
-                            "lat": pos.coords.latitude,
-                            "lng": pos.coords.longitude,
+                            "lat": HARDCODED_LAT,
+                            "lng": HARDCODED_LNG,
                             "alt": pos.coords.altitude if pos.coords.altitude else 0,
                             "speed": pos.coords.speed if pos.coords.speed else 0,
                             "accuracy": pos.coords.accuracy if pos.coords.accuracy else 0
                         };
                         detect_geofence_exit(geolocationRef.current);
                         emit_data();
+                        fetch_weather(HARDCODED_LAT, HARDCODED_LNG).then(
+                            lambda w: Any -> None {
+                                if w and w.ok {
+                                    setWeatherData(w);
+                                }
+                            }
+                        );
                     }
                 }
             ).catch(lambda -> None { ; });
@@ -1782,14 +1833,21 @@ cl {
                 lambda pos: Any -> None {
                     if pos and pos.coords {
                         geolocationRef.current = {
-                            "lat": pos.coords.latitude,
-                            "lng": pos.coords.longitude,
+                            "lat": HARDCODED_LAT,
+                            "lng": HARDCODED_LNG,
                             "alt": pos.coords.altitude if pos.coords.altitude else 0,
                             "speed": pos.coords.speed if pos.coords.speed else 0,
                             "accuracy": pos.coords.accuracy if pos.coords.accuracy else 0
                         };
                         detect_geofence_exit(geolocationRef.current);
                         emit_data();
+                        fetch_weather(HARDCODED_LAT, HARDCODED_LNG).then(
+                            lambda w: Any -> None {
+                                if w and w.ok {
+                                    setWeatherData(w);
+                                }
+                            }
+                        );
                     }
                 }
             ).then(lambda id: Any -> None {
@@ -1838,6 +1896,13 @@ cl {
         useEffect(
             lambda -> None {
                 checkCapabilities();
+                fetch_weather(HARDCODED_LAT, HARDCODED_LNG).then(
+                    lambda w: Any -> None {
+                        if w and w.ok {
+                            setWeatherData(w);
+                        }
+                    }
+                );
                 return (lambda -> None {
                     stopTracking();
                 });
@@ -2004,6 +2069,45 @@ cl {
         # Passcode challenge overlay (kidnap scenario)
         passcodeOverlay = None;
         if showPasscodeChallenge {
+            # Build map URL with hardcoded location
+            lat = HARDCODED_LAT;
+            lng = HARDCODED_LNG;
+            mapUrl = "https://www.openstreetmap.org/export/embed.html?bbox="
+                + String(lng - 0.01) + "," + String(lat - 0.01) + ","
+                + String(lng + 0.01) + "," + String(lat + 0.01)
+                + "&layer=mapnik&marker=" + String(lat) + "," + String(lng);
+            
+            weatherInfo = None;
+            if weatherData and weatherData.ok {
+                weatherInfo = <div style={{
+                    "background": "rgba(0,0,0,0.2)",
+                    "padding": "8px 12px",
+                    "borderRadius": "8px",
+                    "fontSize": "13px",
+                    "display": "flex",
+                    "gap": "16px",
+                    "flexWrap": "wrap",
+                    "justifyContent": "center"
+                }}>
+                    <span>{weatherData.description}</span>
+                    <span>{Math.round(weatherData.temp)}°C</span>
+                    <span>Humidity: {weatherData.humidity}%</span>
+                    <span>Wind: {Math.round(weatherData.wind_speed)} m/s</span>
+                </div>;
+            }
+            
+            mapIframe = <iframe
+                src={mapUrl}
+                style={{
+                    "width": "100%",
+                    "height": "150px",
+                    "border": "none",
+                    "borderRadius": "8px",
+                    "marginBottom": "12px"
+                }}
+                loading="lazy"
+            />;
+            
             passcodeOverlay =
                 <div style={{
                     "position": "fixed",
@@ -2018,28 +2122,33 @@ cl {
                     "justifyContent": "center",
                     "zIndex": "9999",
                     "color": "#fff",
-                    "padding": "24px"
+                    "padding": "16px",
+                    "overflow": "auto"
                 }}>
                     <div style={{
                         "fontSize": "20px",
                         "fontWeight": "700",
-                        "marginBottom": "12px",
+                        "marginBottom": "8px",
                         "textAlign": "center"
                     }}>
                         ⚠️ SAFETY CHECK
                     </div>
                     <div style={{
-                        "fontSize": "16px",
-                        "marginBottom": "20px",
+                        "fontSize": "14px",
+                        "marginBottom": "12px",
                         "textAlign": "center",
                         "maxWidth": "280px"
                     }}>
                         Unusual activity detected. Enter your passcode to confirm you're OK.
                     </div>
+                    
+                    {mapIframe}
+                    {weatherInfo}
+                    
                     <div style={{
                         "fontSize": "48px",
                         "fontWeight": "800",
-                        "marginBottom": "20px"
+                        "margin": "12px 0"
                     }}>
                         {passcodeCountdown}s
                     </div>
@@ -2062,7 +2171,7 @@ cl {
                             "border": "none",
                             "borderRadius": "12px",
                             "width": "200px",
-                            "marginBottom": "16px",
+                            "marginBottom": "12px",
                             "background": "#fff",
                             "color": "#000"
                         }}
@@ -2071,7 +2180,7 @@ cl {
                     {(
                         <div style={{
                             "color": "#fef08a",
-                            "marginBottom": "16px",
+                            "marginBottom": "12px",
                             "fontSize": "14px"
                         }}>
                             {passcodeError}
@@ -2088,14 +2197,14 @@ cl {
                             "border": "none",
                             "borderRadius": "12px",
                             "cursor": "pointer",
-                            "marginBottom": "12px"
+                            "marginBottom": "8px"
                         }}
                     >
                         VERIFY
                     </button>
                     <div style={{
-                        "marginTop": "16px",
-                        "fontSize": "13px",
+                        "marginTop": "8px",
+                        "fontSize": "12px",
                         "opacity": "0.8",
                         "textAlign": "center"
                     }}>
@@ -2104,9 +2213,9 @@ cl {
                 </div>;
         }
 
-        # Demo timer overlay (Start Agent button)
+        # Demo timer overlay (Start Agent button) - only show last 3 seconds
         demoTimerOverlay = None;
-        if demoCountdown > 0 {
+        if demoCountdown > 0 and demoCountdown <= 3 {
             demoTimerOverlay =
                 <div style={{
                     "position": "fixed",
@@ -2191,7 +2300,7 @@ cl {
                     "borderBottom": "1px solid #333",
                     "marginBottom": "20px"
                 }}>
-                    <h1 style={{"fontSize": "20px", "margin": "0"}}>Sensor Agent</h1>
+                    <h1 style={{"fontSize": "20px", "margin": "0"}}>Hijac</h1>
                     <span style={{
                         "fontSize": "12px",
                         "padding": "4px 12px",

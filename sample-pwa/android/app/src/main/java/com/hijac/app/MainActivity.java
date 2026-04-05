@@ -1,4 +1,4 @@
-package com.jac.app;
+package com.hijac.app;
 
 import com.getcapacitor.BridgeActivity;
 

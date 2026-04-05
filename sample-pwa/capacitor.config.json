@@ -1,6 +1,6 @@
 {
-  "appId": "com.jac.app",
-  "appName": "Jac App",
+  "appId": "com.hijac.app",
+  "appName": "Hijac",
   "webDir": ".jac/client/dist",
   "server": {
     "iosScheme": "capacitor"
