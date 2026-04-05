@@ -24,3 +24,4 @@ TestResults.xml
 opencode.json
 
 .jac/
+node_modules/
