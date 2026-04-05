@@ -129,11 +129,11 @@ cl {
 
     def fall_detection_thresholds -> dict {
         return {
-            "impact_accel_norm": 25.0,  # m/s² (3G+)
-            "stillness_gyro_norm": 0.1,  # rad/s
-            "stillness_duration_ms": 3000,  # 3 seconds of stillness
-            "orientation_change_deg": 60.0,  # degrees from upright
-            "confidence_threshold": 0.90,
+            "impact_accel_norm": 15.0,  # m/s² (~1.5G) - phone drop creates 15-30 m/s²
+            "stillness_gyro_norm": 0.5,  # rad/s - realistic for a still phone with sensor noise
+            "stillness_duration_ms": 2000,  # 2 seconds of stillness after impact
+            "orientation_change_deg": 45.0,  # degrees from upright - phone landed on side/face
+            "confidence_threshold": 0.80,
             "countdown_seconds": 30
         };
     }
@@ -510,6 +510,7 @@ cl {
         fallCountdownRef = useRef(None);  # Countdown timer interval
         [fallCountdown, setFallCountdown] = useState(0);  # Countdown seconds remaining (0 = no countdown)
         [fallDetected, setFallDetected] = useState(False);  # Whether fall is confirmed
+        fallDetectionStarted = useRef(False);  # Track if fall detection listener is already running
 
         # Demo timer state (for Start Agent button)
         demoTimerRef = useRef(None);
@@ -1431,6 +1432,35 @@ cl {
             start_passcode_challenge();
         }
 
+        def simulate_fall -> None {
+            # Directly trigger fall detection countdown for testing
+            print("FALL SIMULATION: Triggering fall detection");
+            
+            thresholds = fall_detection_thresholds();
+            
+            # Log fall event
+            log_fall_event(0.95, 28.0, 0.05, 3500);
+            
+            # Haptic feedback
+            try {
+                Haptics.impact({"style": ImpactStyle.Heavy});
+            } except Exception as e {
+                ;
+            }
+            
+            # Start the countdown
+            start_fall_countdown(0.95, 28.0, 0.05, 3500);
+            
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "trigger",
+                    "message": "SIMULATED: Fall detected! Emergency countdown started",
+                    "priority": 3,
+                    "source": "fall_detector"
+                }]);
+            });
+        }
+
         def emit_data -> None {
             setSensorData({
                 "motion": motionRef.current,
@@ -1625,6 +1655,8 @@ cl {
         }
 
         async def startTracking -> None {
+            print("startTracking called!");
+            
             # Set tracking flag FIRST so listener callbacks will process events
             isTrackingRef.current = True;
 
@@ -1688,91 +1720,10 @@ cl {
                 200
             );
 
-            # Only attach motion listener if not already attached
-            if not motionListenerAttached.current {
-                print("Attaching motion listener for first time");
-                Motion.addListener(
-                    "accel",
-                    lambda event: Any -> None {
-                        # Check tracking flag - skip processing if not tracking
-                        if not isTrackingRef.current {
-                            return;
-                        }
-
-                        print("Motion event raw", event);
-                        ax = 0;
-                        ay = 0;
-                        az = 0;
-                        alpha = 0;
-                        beta = 0;
-                        gamma = 0;
-
-                        if event and event.acceleration {
-                            ax = event.acceleration.x if event.acceleration.x else 0;
-                            ay = event.acceleration.y if event.acceleration.y else 0;
-                            az = event.acceleration.z if event.acceleration.z else 0;
-                        }
-                        if event and event.rotationRate {
-                            alpha = event.rotationRate.alpha if event.rotationRate.alpha else 0;
-                            beta = event.rotationRate.beta if event.rotationRate.beta else 0;
-                            gamma = event.rotationRate.gamma if event.rotationRate.gamma else 0;
-                        }
-
-                        if event and event.accelerationIncludingGravity and (
-                            ax == 0 and ay == 0 and az == 0
-                        ) {
-                            ax = event.accelerationIncludingGravity.x if event.accelerationIncludingGravity.x else 0;
-                            ay = event.accelerationIncludingGravity.y if event.accelerationIncludingGravity.y else 0;
-                            az = event.accelerationIncludingGravity.z if event.accelerationIncludingGravity.z else 0;
-                        }
-
-                        motionRef.current = {
-                            "acceleration": {
-                                "x": ax,
-                                "y": ay,
-                                "z": az
-                            },
-                            "rotationRate": {
-                                "alpha": alpha,
-                                "beta": beta,
-                                "gamma": gamma
-                            },
-                            "timestamp": Date.now()
-                        };
-                        emit_data();
-
-                        lastMotionRef.current = motionRef.current;
-
-                        # Fall detection - check every motion event
-                        detect_fall(ax, ay, az, alpha, beta, gamma);
-
-                        decide_motion_with_walker(
-                            motionRef.current,
-                            agentConfig,
-                            False
-                        ).then(
-                            lambda localDecision: Any -> None {
-                                if localDecision and localDecision.priority > 0 {
-                                    handleAction(localDecision);
-                                }
-                                evaluate_rules_and_act(motionRef.current, "live");
-                            }
-                        ).catch(lambda -> None { ; });
-                    }
-                ).then(
-                    lambda handle: Any -> None {
-                        accelSubRef.current = handle;
-                        motionListenerAttached.current = True;
-                        print("Motion listener attached successfully");
-                    }
-                ).catch(
-                    lambda e: Any -> None {
-                        print("Motion listener error", e);
-                    }
-                );
-            } else {
-                print("Motion listener already attached, reusing existing");
-            }
+            # Attach motion listener if not already attached
+            # On iOS, the auto-start in useEffect may have failed, so we try again here
+            # after requesting permissions (user gesture)
+            attachMotionListener();
 
             CapacitorBarometer.startMeasurementUpdates().then(
                 lambda -> None {
@@ -1893,6 +1844,96 @@ cl {
             }
         }
 
+        def attachMotionListener -> None {
+            # Attach motion listener for fall detection and agent processing
+            # This is called once and the listener runs continuously
+            
+            if motionListenerAttached.current {
+                print("Motion listener already attached");
+                return;
+            }
+            
+            print("Attaching motion listener");
+            
+            Motion.addListener(
+                "accel",
+                lambda event: Any -> None {
+                    ax = 0;
+                    ay = 0;
+                    az = 0;
+                    alpha = 0;
+                    beta = 0;
+                    gamma = 0;
+
+                    if event and event.acceleration {
+                        ax = event.acceleration.x if event.acceleration.x else 0;
+                        ay = event.acceleration.y if event.acceleration.y else 0;
+                        az = event.acceleration.z if event.acceleration.z else 0;
+                    }
+                    if event and event.rotationRate {
+                        alpha = event.rotationRate.alpha if event.rotationRate.alpha else 0;
+                        beta = event.rotationRate.beta if event.rotationRate.beta else 0;
+                        gamma = event.rotationRate.gamma if event.rotationRate.gamma else 0;
+                    }
+
+                    if event and event.accelerationIncludingGravity and (
+                        ax == 0 and ay == 0 and az == 0
+                    ) {
+                        ax = event.accelerationIncludingGravity.x if event.accelerationIncludingGravity.x else 0;
+                        ay = event.accelerationIncludingGravity.y if event.accelerationIncludingGravity.y else 0;
+                        az = event.accelerationIncludingGravity.z if event.accelerationIncludingGravity.z else 0;
+                    }
+
+                    # ALWAYS process fall detection regardless of agent state
+                    detect_fall(ax, ay, az, alpha, beta, gamma);
+                    
+                    # Update motion ref and UI only if agent is tracking
+                    if isTrackingRef.current {
+                        motionRef.current = {
+                            "acceleration": {
+                                "x": ax,
+                                "y": ay,
+                                "z": az
+                            },
+                            "rotationRate": {
+                                "alpha": alpha,
+                                "beta": beta,
+                                "gamma": gamma
+                            },
+                            "timestamp": Date.now()
+                        };
+                        lastMotionRef.current = motionRef.current;
+                        
+                        emit_data();
+                        
+                        decide_motion_with_walker(
+                            motionRef.current,
+                            agentConfig,
+                            False
+                        ).then(
+                            lambda localDecision: Any -> None {
+                                if localDecision and localDecision.priority > 0 {
+                                    handleAction(localDecision);
+                                }
+                                evaluate_rules_and_act(motionRef.current, "live");
+                            }
+                        ).catch(lambda -> None { ; });
+                    }
+                }
+            ).then(
+                lambda handle: Any -> None {
+                    accelSubRef.current = handle;
+                    motionListenerAttached.current = True;
+                    fallDetectionStarted.current = True;
+                    print("Motion listener attached successfully");
+                }
+            ).catch(
+                lambda e: Any -> None {
+                    print("Motion listener error", e);
+                }
+            );
+        }
+
         useEffect(
             lambda -> None {
                 checkCapabilities();
@@ -1903,6 +1944,11 @@ cl {
                         }
                     }
                 );
+                
+                # Auto-start motion listener on app mount for fall detection
+                # This may fail on iOS without user gesture, but will work on Android
+                attachMotionListener();
+                
                 return (lambda -> None {
                     stopTracking();
                 });
@@ -2284,13 +2330,13 @@ cl {
 
         return
             <div style={{
-                "maxWidth": "480px",
-                "margin": "0 auto",
+                "width": "100%",
                 "padding": "16px",
                 "minHeight": "100vh",
                 "background": "#0f0f0f",
                 "color": "#e0e0e0",
-                "fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif"
+                "fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif",
+                "boxSizing": "border-box"
             }}>
                 <header style={{
                     "display": "flex",
@@ -2301,15 +2347,26 @@ cl {
                     "marginBottom": "20px"
                 }}>
                     <h1 style={{"fontSize": "20px", "margin": "0"}}>Hijac</h1>
-                    <span style={{
-                        "fontSize": "12px",
-                        "padding": "4px 12px",
-                        "borderRadius": "20px",
-                        "background": "#1a1a1a",
-                        "color": statusClass
-                    }}>
-                        {"Running" if isTracking else "Idle"}
-                    </span>
+                    <div style={{"display": "flex", "gap": "8px", "alignItems": "center"}}>
+                        <span style={{
+                            "fontSize": "10px",
+                            "padding": "4px 8px",
+                            "borderRadius": "20px",
+                            "background": "#1a1a1a",
+                            "color": "#22c55e"
+                        }}>
+                            Fall Detection ON
+                        </span>
+                        <span style={{
+                            "fontSize": "12px",
+                            "padding": "4px 12px",
+                            "borderRadius": "20px",
+                            "background": "#1a1a1a",
+                            "color": statusClass
+                        }}>
+                            {"Agent Running" if isTracking else "Agent Idle"}
+                        </span>
+                    </div>
                 </header>
 
                 <main style={{"display": "flex", "flexDirection": "column", "gap": "16px"}}>
@@ -2475,6 +2532,24 @@ cl {
                             }}
                         >
                             Simulate Sensor Event
+                        </button>
+                        
+                        <button
+                            onClick={simulate_fall}
+                            style={{
+                                "width": "100%",
+                                "padding": "10px",
+                                "marginTop": "10px",
+                                "border": "none",
+                                "borderRadius": "8px",
+                                "fontSize": "13px",
+                                "fontWeight": "600",
+                                "cursor": "pointer",
+                                "background": "#dc2626",
+                                "color": "#fff"
+                            }}
+                        >
+                            Simulate Fall
                         </button>
                     </section>
 
