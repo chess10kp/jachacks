@@ -39,6 +39,10 @@ INSFORGE_ANON_KEY=<anon_key_for_client_calls>
 # Backboard
 BACKBOARD_BASE_URL=https://app.backboard.io/api
 BACKBOARD_KEY=<backboard_api_key>
+
+# Emergency Contact (Fall Detection)
+EMERGENCY_CONTACT=+1-555-911-0000
+EMERGENCY_CONTACT_NAME=Emergency Services
 ```
 
 Important:
@@ -55,7 +59,7 @@ All required demo tables are created.
 | Table | Purpose |
 |---|---|
 | `sensor_events` | Raw sensor samples + derived metrics/flags |
-| `episode_log` | Normalized episodes (`face_down_stationary`, `pickup_transition`, `geofence_exit`) |
+| `episode_log` | Normalized episodes (`face_down_stationary`, `pickup_transition`, `geofence_exit`, `fall_detected`) |
 | `action_log` | Suggested/executed actions and outcomes |
 | `user_patterns` | Compact user scorecard (`accept_rate`, `confidence`, `last_seen`) |
 | `conversation_notes` | Focus-mode note snippets and extracted entities |
@@ -150,6 +154,7 @@ Use these namespaces in memory content/metadata:
 - `ritual_patterns`
 - `geofence_patterns`
 - `conversation_commitments`
+- `safety_events` (fall detection, emergency calls)
 
 ## 5) Provisioned Demo Resources (Current)
 
@@ -268,6 +273,77 @@ InsForge integration mapping stored in `user_integrations`:
 }
 ```
 
+### 6.6 `episode_log` (Fall Detection)
+
+```json
+{
+  "user_id": "demo_user",
+  "episode_type": "fall_detected",
+  "start_ts": "2026-04-05T14:30:00Z",
+  "end_ts": "2026-04-05T14:30:03Z",
+  "confidence": 0.95,
+  "context_json": {
+    "impact_accel": 45.2,
+    "post_impact_stillness_sec": 5.0,
+    "orientation_change_deg": 85,
+    "detector_version": "v1",
+    "source": "fall_detection_pipeline"
+  }
+}
+```
+
+**Fall Detection Logic:**
+- **Impact spike**: `accel_norm > 25 m/s²` (3G+ sudden impact)
+- **Post-impact stillness**: `gyro_norm < 0.1 rad/s` for 3+ seconds after impact
+- **Orientation change**: Device orientation changed >60° (person went from upright to horizontal)
+- **Confidence threshold**: 0.90+ triggers immediate emergency call
+
+### 6.7 `action_log` (Emergency Call)
+
+```json
+{
+  "user_id": "demo_user",
+  "episode_id": 99,
+  "action_type": "call_emergency_contact",
+  "action_payload": {
+    "contact_number": "+1-555-911-0000",
+    "contact_name": "Emergency Services",
+    "reason": "fall_detected",
+    "location": { "lat": 37.7749, "lng": -122.4194 }
+  },
+  "status": "executed",
+  "result_json": {
+    "decision_source": "rule",
+    "confidence_score": 0.95,
+    "rule_match": true,
+    "auto_triggered": true,
+    "countdown_skipped": false,
+    "execution_success": true
+  }
+}
+```
+
+### 6.8 `user_rules` (Fall Detection Rule)
+
+```json
+{
+  "user_id": "demo_user",
+  "name": "Emergency call on fall detection",
+  "condition": {
+    "episode_type": "fall_detected",
+    "confidence_min": 0.90
+  },
+  "action_type": "call_emergency_contact",
+  "action_params": {
+    "contact_number": "${EMERGENCY_CONTACT}",
+    "contact_name": "${EMERGENCY_CONTACT_NAME}",
+    "countdown_sec": 30,
+    "include_location": true
+  },
+  "enabled": true
+}
+```
+
 ## 7) Agent Loop Contract (What to Read/Write and When)
 
 Implement one deterministic `runCycle` for each detected episode.
@@ -289,6 +365,30 @@ Implement one deterministic `runCycle` for each detected episode.
    - update `user_patterns` (accept rate/confidence)
 6. **Persist to Backboard**
    - write compact memory summary with namespace and outcome
+
+### 7.1 Fall Detection Loop (Special Case)
+
+Fall detection is a **safety-critical flow** with different rules:
+
+1. **Detect fall signature**
+   - Impact spike: `accel_norm > 25 m/s²` (3G+)
+   - Post-impact stillness: `gyro_norm < 0.1` for 3+ seconds
+   - Orientation change: >60° from upright
+2. **Compute confidence** (all three signals)
+   - Impact only: 0.4
+   - Impact + stillness: 0.7
+   - Impact + stillness + orientation: 0.95
+3. **Trigger countdown** (if confidence >= 0.90)
+   - Show 30-second countdown UI
+   - User can cancel if false positive
+   - If not cancelled, execute emergency call
+4. **Execute emergency call**
+   - Read `EMERGENCY_CONTACT` from env
+   - Log to `action_log` with `auto_triggered: true`
+   - Include GPS location in payload
+5. **Post-call logging**
+   - Write to Backboard: `[safety_events] fall detected, emergency call placed`
+   - Update `user_patterns` with event timestamp
 
 ## 8) Integration Snippets
 

@@ -39,7 +39,7 @@ interface SensorEvent {
 // Episode
 interface Episode {
   user_id: string;
-  episode_type: "face_down_stationary" | "pickup_transition" | "geofence_exit";
+  episode_type: "face_down_stationary" | "pickup_transition" | "geofence_exit" | "fall_detected";
   start_ts: string;          // ISO8601
   end_ts: string;            // ISO8601
   confidence: number;        // 0.0 - 1.0
@@ -48,6 +48,10 @@ interface Episode {
     avg_gyro_norm?: number;
     accel_spike?: number;
     prior_episode?: string;
+    // Fall detection specific
+    impact_accel?: number;   // m/s² at impact
+    post_impact_stillness_sec?: number;
+    orientation_change_deg?: number;
     detector_version: string;
     source: string;
   };
@@ -57,7 +61,7 @@ interface Episode {
 interface Action {
   user_id: string;
   episode_id: number;        // FK to episode_log.id
-  action_type: "create_calendar_event" | "send_notification" | "open_maps" | "set_reminder";
+  action_type: "create_calendar_event" | "send_notification" | "open_maps" | "set_reminder" | "call_emergency_contact";
   action_payload: Record<string, any>;
   status: "suggested" | "accepted" | "rejected" | "executed" | "failed";
   result_json: {
@@ -67,6 +71,8 @@ interface Action {
     rule_match?: boolean;
     user_response?: string;
     execution_success?: boolean;
+    auto_triggered?: boolean;  // For emergency actions
+    countdown_skipped?: boolean;
   };
   ts?: string;
 }
@@ -102,7 +108,7 @@ interface UserRule {
 interface MemoryWrite {
   content: string;           // Include namespace tag: "[ritual_patterns] ..."
   metadata: {
-    namespace: "ritual_patterns" | "geofence_patterns" | "conversation_commitments";
+    namespace: "ritual_patterns" | "geofence_patterns" | "conversation_commitments" | "safety_events";
     user_id: string;
     confidence?: string;
   };
@@ -643,6 +649,219 @@ curl -s -X PATCH "${INSFORGE_BASE_URL}/api/database/records/user_patterns?user_i
 echo "Rejection learning flow complete!"
 ```
 
+### Scenario 4: Fall Detection Emergency Call
+
+This simulates: sudden impact detected → post-impact stillness → fall confirmed → countdown → emergency call
+
+```bash
+#!/bin/bash
+# Run from project root
+# Requires: EMERGENCY_CONTACT and EMERGENCY_CONTACT_NAME in .env
+
+source .env
+
+# 1. Log high-impact sensor event (fall impact signature)
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/sensor_events" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "demo_user",
+    "sensor_type": "motion_2hz",
+    "payload_json": {
+      "accel_x": 15.2,
+      "accel_y": -28.5,
+      "accel_z": -32.1,
+      "gyro_x": 2.8,
+      "gyro_y": 3.2,
+      "gyro_z": 1.5
+    },
+    "derived_json": {
+      "accel_norm": 45.2,
+      "gyro_norm": 4.5,
+      "is_flat": false,
+      "is_face_down": false,
+      "impact_detected": true,
+      "impact_magnitude": 45.2
+    }
+  }]'
+
+# 2. Log post-impact stillness (3 seconds later)
+sleep 1
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/sensor_events" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "demo_user",
+    "sensor_type": "motion_2hz",
+    "payload_json": {
+      "accel_x": 0.1,
+      "accel_y": -9.7,
+      "accel_z": -0.3,
+      "gyro_x": 0.02,
+      "gyro_y": 0.01,
+      "gyro_z": 0.03
+    },
+    "derived_json": {
+      "accel_norm": 9.71,
+      "gyro_norm": 0.04,
+      "is_flat": true,
+      "is_face_down": false,
+      "post_impact_stillness": true,
+      "orientation_horizontal": true
+    }
+  }]'
+
+# 3. Log fall_detected episode
+EPISODE_RESPONSE=$(curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/episode_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_type": "fall_detected",
+    "start_ts": "'$(date -u -d '-5 seconds' +%Y-%m-%dT%H:%M:%SZ)'",
+    "end_ts": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "confidence": 0.95,
+    "context_json": {
+      "impact_accel": 45.2,
+      "post_impact_stillness_sec": 5.0,
+      "orientation_change_deg": 85,
+      "detector_version": "v1",
+      "source": "fall_detection_pipeline"
+    }
+  }]')
+EPISODE_ID=$(echo $EPISODE_RESPONSE | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+echo "Fall episode logged: $EPISODE_ID"
+
+# 4. Check for fall detection rule
+echo "Checking fall detection rule..."
+curl -s -X GET "${INSFORGE_BASE_URL}/api/database/records/user_rules?user_id=eq.demo_user&action_type=eq.call_emergency_contact&enabled=eq.true" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+
+# 5. Log emergency call action (auto-triggered after countdown)
+ACTION_RESPONSE=$(curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/action_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_id": '$EPISODE_ID',
+    "action_type": "call_emergency_contact",
+    "action_payload": {
+      "contact_number": "'${EMERGENCY_CONTACT:-+1-555-911-0000}'",
+      "contact_name": "'${EMERGENCY_CONTACT_NAME:-Emergency Services}'",
+      "reason": "fall_detected",
+      "location": {"lat": 37.7749, "lng": -122.4194},
+      "countdown_sec": 30
+    },
+    "status": "executed",
+    "result_json": {
+      "decision_source": "rule",
+      "confidence_score": 0.95,
+      "rule_match": true,
+      "auto_triggered": true,
+      "countdown_skipped": false,
+      "execution_success": true
+    }
+  }]')
+ACTION_ID=$(echo $ACTION_RESPONSE | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+echo "Emergency call action logged: $ACTION_ID"
+
+# 6. Write safety event to Backboard
+curl -s -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "[safety_events] user:demo_user FALL DETECTED - emergency call placed to '${EMERGENCY_CONTACT_NAME:-Emergency Services}' at '${EMERGENCY_CONTACT:-+1-555-911-0000}'. Impact: 45.2 m/s², confidence: 0.95. Location: 37.7749, -122.4194",
+    "metadata": {
+      "namespace": "safety_events",
+      "user_id": "demo_user",
+      "event_type": "fall_detected",
+      "severity": "critical"
+    }
+  }'
+
+echo ""
+echo "==================================="
+echo "FALL DETECTION FLOW COMPLETE"
+echo "==================================="
+echo "Episode ID: $EPISODE_ID"
+echo "Action ID: $ACTION_ID"
+echo "Emergency Contact: ${EMERGENCY_CONTACT:-+1-555-911-0000}"
+echo "==================================="
+```
+
+### Scenario 5: Fall Detection - User Cancels (False Positive)
+
+```bash
+#!/bin/bash
+# User cancels emergency call during countdown (false positive fall)
+
+source .env
+
+# 1. Log fall_detected episode (lower confidence)
+EPISODE_RESPONSE=$(curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/episode_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_type": "fall_detected",
+    "start_ts": "'$(date -u -d '-3 seconds' +%Y-%m-%dT%H:%M:%SZ)'",
+    "end_ts": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "confidence": 0.91,
+    "context_json": {
+      "impact_accel": 28.5,
+      "post_impact_stillness_sec": 3.0,
+      "orientation_change_deg": 45,
+      "detector_version": "v1",
+      "source": "fall_detection_pipeline"
+    }
+  }]')
+EPISODE_ID=$(echo $EPISODE_RESPONSE | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+
+# 2. Log emergency call action as cancelled
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/action_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "demo_user",
+    "episode_id": '$EPISODE_ID',
+    "action_type": "call_emergency_contact",
+    "action_payload": {
+      "contact_number": "'${EMERGENCY_CONTACT:-+1-555-911-0000}'",
+      "contact_name": "'${EMERGENCY_CONTACT_NAME:-Emergency Services}'",
+      "reason": "fall_detected"
+    },
+    "status": "rejected",
+    "result_json": {
+      "decision_source": "rule",
+      "confidence_score": 0.91,
+      "rule_match": true,
+      "auto_triggered": true,
+      "countdown_skipped": true,
+      "user_response": "cancelled",
+      "cancellation_reason": "false_positive"
+    }
+  }]'
+
+# 3. Write false positive to Backboard (helps calibrate future detection)
+curl -s -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "[safety_events] user:demo_user fall detection FALSE POSITIVE - user cancelled emergency call. Impact: 28.5 m/s², confidence: 0.91. May need to adjust threshold for this user.",
+    "metadata": {
+      "namespace": "safety_events",
+      "user_id": "demo_user",
+      "event_type": "fall_false_positive",
+      "severity": "info"
+    }
+  }'
+
+echo "False positive flow complete - emergency call cancelled by user"
+```
+
 ---
 
 ## Jac Integration Patterns
@@ -714,6 +933,225 @@ walker agent_cycle {
         
         # 6. Write outcome to memory
         write_outcome(user_id, episode_type, action, confidence);
+    }
+}
+```
+
+### Pattern 4: Fall Detection Walker
+
+```jac
+import:py os;
+import:py subprocess;
+import:py json;
+
+# Fall detection thresholds
+glob IMPACT_THRESHOLD = 25.0;      # m/s² (3G+)
+glob STILLNESS_THRESHOLD = 0.1;    # rad/s
+glob STILLNESS_DURATION = 3.0;     # seconds
+glob ORIENTATION_THRESHOLD = 60.0; # degrees
+glob CONFIDENCE_THRESHOLD = 0.90;
+glob COUNTDOWN_SEC = 30;
+
+node sensor_sample {
+    has accel_norm: float;
+    has gyro_norm: float;
+    has orientation_deg: float;
+    has timestamp: float;
+}
+
+node fall_event {
+    has user_id: str;
+    has impact_accel: float;
+    has stillness_sec: float;
+    has orientation_change: float;
+    has confidence: float;
+    has location: dict;
+}
+
+walker fall_detector {
+    has recent_samples: list = [];
+    has impact_detected: bool = False;
+    has impact_time: float = 0.0;
+    has impact_accel: float = 0.0;
+    
+    can process_sample with sensor_sample entry {
+        # Add to rolling window
+        self.recent_samples.append(here);
+        if len(self.recent_samples) > 10 {
+            self.recent_samples.pop(0);
+        }
+        
+        # Check for impact spike
+        if here.accel_norm > IMPACT_THRESHOLD and not self.impact_detected {
+            self.impact_detected = True;
+            self.impact_time = here.timestamp;
+            self.impact_accel = here.accel_norm;
+            print(f"IMPACT DETECTED: {here.accel_norm} m/s²");
+        }
+        
+        # Check for post-impact stillness
+        if self.impact_detected {
+            time_since_impact = here.timestamp - self.impact_time;
+            
+            if time_since_impact >= STILLNESS_DURATION {
+                # Check if still during window
+                stillness_samples = [s for s in self.recent_samples 
+                                    if s.timestamp > self.impact_time 
+                                    and s.gyro_norm < STILLNESS_THRESHOLD];
+                
+                if len(stillness_samples) >= 3 {
+                    # Compute confidence
+                    confidence = self.compute_fall_confidence(
+                        self.impact_accel,
+                        len(stillness_samples),
+                        here.orientation_deg
+                    );
+                    
+                    if confidence >= CONFIDENCE_THRESHOLD {
+                        # Trigger fall event
+                        fall = fall_event(
+                            user_id="demo_user",
+                            impact_accel=self.impact_accel,
+                            stillness_sec=time_since_impact,
+                            orientation_change=here.orientation_deg,
+                            confidence=confidence,
+                            location={"lat": 37.7749, "lng": -122.4194}
+                        );
+                        visit fall;
+                    }
+                }
+                
+                # Reset detector
+                self.impact_detected = False;
+            }
+        }
+    }
+    
+    can compute_fall_confidence(impact: float, stillness_count: int, orientation: float) -> float {
+        score = 0.0;
+        
+        # Impact contribution (0.4 max)
+        if impact > IMPACT_THRESHOLD {
+            score += 0.4 * min(impact / 50.0, 1.0);
+        }
+        
+        # Stillness contribution (0.3 max)
+        score += 0.3 * min(stillness_count / 5.0, 1.0);
+        
+        # Orientation contribution (0.3 max)
+        if orientation > ORIENTATION_THRESHOLD {
+            score += 0.3 * min(orientation / 90.0, 1.0);
+        }
+        
+        return score;
+    }
+    
+    can trigger_emergency with fall_event entry {
+        print(f"FALL CONFIRMED - Confidence: {here.confidence}");
+        print(f"Starting {COUNTDOWN_SEC}s countdown...");
+        
+        # Get emergency contact from env
+        emergency_contact = os.getenv("EMERGENCY_CONTACT", "+1-555-911-0000");
+        emergency_name = os.getenv("EMERGENCY_CONTACT_NAME", "Emergency Services");
+        
+        # Log episode to InsForge
+        episode_id = self.log_fall_episode(here);
+        
+        # Execute emergency call (after countdown in real impl)
+        self.execute_emergency_call(here, episode_id, emergency_contact, emergency_name);
+        
+        # Write to Backboard
+        self.write_safety_memory(here, emergency_contact);
+    }
+    
+    can log_fall_episode(fall: fall_event) -> str {
+        import:py subprocess;
+        import:py json;
+        import:py datetime;
+        
+        now = datetime.datetime.utcnow().isoformat() + "Z";
+        
+        payload = [{
+            "user_id": fall.user_id,
+            "episode_type": "fall_detected",
+            "start_ts": now,
+            "end_ts": now,
+            "confidence": fall.confidence,
+            "context_json": {
+                "impact_accel": fall.impact_accel,
+                "post_impact_stillness_sec": fall.stillness_sec,
+                "orientation_change_deg": fall.orientation_change,
+                "detector_version": "v1",
+                "source": "fall_detection_pipeline"
+            }
+        }];
+        
+        cmd = f'''curl -s -X POST "https://ww8eiidv.us-east.insforge.app/api/database/records/episode_log" \
+            -H "Authorization: Bearer {os.getenv('INSFORGE_ANON_KEY')}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=representation" \
+            -d '{json.dumps(payload)}' ''';
+        
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True);
+        data = json.loads(result.stdout);
+        return data[0].get("id", "unknown");
+    }
+    
+    can execute_emergency_call(fall: fall_event, episode_id: str, contact: str, name: str) {
+        import:py subprocess;
+        import:py json;
+        
+        payload = [{
+            "user_id": fall.user_id,
+            "episode_id": int(episode_id) if episode_id.isdigit() else None,
+            "action_type": "call_emergency_contact",
+            "action_payload": {
+                "contact_number": contact,
+                "contact_name": name,
+                "reason": "fall_detected",
+                "location": fall.location
+            },
+            "status": "executed",
+            "result_json": {
+                "decision_source": "rule",
+                "confidence_score": fall.confidence,
+                "rule_match": True,
+                "auto_triggered": True,
+                "execution_success": True
+            }
+        }];
+        
+        cmd = f'''curl -s -X POST "https://ww8eiidv.us-east.insforge.app/api/database/records/action_log" \
+            -H "Authorization: Bearer {os.getenv('INSFORGE_ANON_KEY')}" \
+            -H "Content-Type: application/json" \
+            -d '{json.dumps(payload)}' ''';
+        
+        subprocess.run(cmd, shell=True, capture_output=True, text=True);
+        print(f"Emergency call placed to {name} at {contact}");
+    }
+    
+    can write_safety_memory(fall: fall_event, contact: str) {
+        import:py subprocess;
+        import:py json;
+        
+        content = f"[safety_events] user:{fall.user_id} FALL DETECTED - emergency call placed. Impact: {fall.impact_accel} m/s², confidence: {fall.confidence}";
+        
+        payload = {
+            "content": content,
+            "metadata": {
+                "namespace": "safety_events",
+                "user_id": fall.user_id,
+                "event_type": "fall_detected",
+                "severity": "critical"
+            }
+        };
+        
+        cmd = f'''curl -s -X POST "https://app.backboard.io/api/assistants/67f63b37-0648-4e96-b084-1c4464bd350b/memories" \
+            -H "X-API-Key: {os.getenv('BACKBOARD_KEY')}" \
+            -H "Content-Type: application/json" \
+            -d '{json.dumps(payload)}' ''';
+        
+        subprocess.run(cmd, shell=True, capture_output=True, text=True);
     }
 }
 ```
