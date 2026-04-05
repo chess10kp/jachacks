@@ -1,4 +1,4 @@
-"""Sensor Agent app ported from the sensor-agent project."""
+# Docstring removed
 
 cl import from react { useState, useEffect, useRef }
 cl import from "@capacitor/motion" { Motion }
@@ -477,6 +477,21 @@ cl {
         [fallCountdown, setFallCountdown] = useState(0);  # Countdown seconds remaining (0 = no countdown)
         [fallDetected, setFallDetected] = useState(False);  # Whether fall is confirmed
 
+        # Demo timer state (for Start Agent button)
+        demoTimerRef = useRef(None);
+        [demoCountdown, setDemoCountdown] = useState(0);
+
+        # Passcode challenge state (for kidnap scenario)
+        passcodeTimerRef = useRef(None);
+        [showPasscodeChallenge, setShowPasscodeChallenge] = useState(False);
+        [passcodeInput, setPasscodeInput] = useState("");
+        [passcodeCountdown, setPasscodeCountdown] = useState(0);
+        [passcodeAttempts, setPasscodeAttempts] = useState(0);
+        [passcodeError, setPasscodeError] = useState("");
+        
+        # The correct passcode - in production this would be user-configured
+        CORRECT_PASSCODE = "1234";
+
         agentConfig = {
             "apiEndpoint": "",
             "motionThreshold": 2.5,
@@ -708,6 +723,263 @@ cl {
                     "message": "Fall alert cancelled by user",
                     "priority": 1,
                     "source": "fall_detector"
+                }]);
+            });
+        }
+
+        # ============ PASSCODE CHALLENGE FUNCTIONS ============
+
+        def start_passcode_challenge -> None {
+            # Docstring removed
+            print("SAFETY: Starting passcode challenge");
+            
+            setShowPasscodeChallenge(True);
+            setPasscodeInput("");
+            setPasscodeAttempts(0);
+            setPasscodeError("");
+            setPasscodeCountdown(60);  # 60 second timeout
+            
+            # Haptic feedback
+            try {
+                Haptics.vibrate({"duration": 500});
+            } except Exception as e {
+                print("Haptics error", e);
+            }
+            
+            # Start countdown timer
+            passcodeTimerRef.current = setInterval(
+                lambda -> None {
+                    setPasscodeCountdown(lambda prev: int -> int {
+                        if prev <= 1 {
+                            # Timeout - escalate to emergency call
+                            clearInterval(passcodeTimerRef.current);
+                            passcodeTimerRef.current = None;
+                            print("SAFETY: Passcode timeout - escalating to emergency call");
+                            on_passcode_timeout();
+                            return 0;
+                        }
+                        return prev - 1;
+                    });
+                },
+                1000
+            );
+            
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "alert",
+                    "message": "Safety check: Enter passcode to confirm you're OK",
+                    "priority": 3,
+                    "source": "safety_monitor"
+                }]);
+            });
+        }
+        
+        def on_passcode_timeout -> None {
+            # Docstring removed
+            setShowPasscodeChallenge(False);
+            setPasscodeInput("");
+            setPasscodeError("");
+            
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "trigger",
+                    "message": "Passcode timeout - initiating emergency call",
+                    "priority": 3,
+                    "source": "safety_monitor"
+                }]);
+            });
+            
+            # Start 30-second countdown before calling
+            start_emergency_countdown_from_passcode();
+        }
+        
+        def start_emergency_countdown_from_passcode -> None {
+            # Docstring removed
+            print("SAFETY: Starting emergency countdown after passcode failure");
+            
+            setFallDetected(True);  # Reuse fall detected UI for countdown
+            setFallCountdown(30);
+            
+            # Haptic pattern
+            try {
+                Haptics.vibrate({"duration": 1000});
+            } except Exception as e {
+                ;
+            }
+            
+            fallCountdownRef.current = setInterval(
+                lambda -> None {
+                    setFallCountdown(lambda prev: int -> int {
+                        if prev <= 1 {
+                            clearInterval(fallCountdownRef.current);
+                            fallCountdownRef.current = None;
+                            execute_emergency_call();
+                            return 0;
+                        }
+                        # Vibrate every 5 seconds
+                        if prev % 5 == 0 {
+                            try {
+                                Haptics.vibrate({"duration": 200});
+                            } except Exception as e {
+                                ;
+                            }
+                        }
+                        return prev - 1;
+                    });
+                },
+                1000
+            );
+        }
+        
+        def verify_passcode(entered: str) -> None {
+            # Docstring removed
+            print("SAFETY: Verifying passcode attempt");
+            
+            if entered == CORRECT_PASSCODE {
+                # Correct passcode - user is safe
+                print("SAFETY: Passcode verified - user is OK");
+                
+                if passcodeTimerRef.current {
+                    clearInterval(passcodeTimerRef.current);
+                    passcodeTimerRef.current = None;
+                }
+                
+                setShowPasscodeChallenge(False);
+                setPasscodeInput("");
+                setPasscodeCountdown(0);
+                setPasscodeError("");
+                setPasscodeAttempts(0);
+                
+                # Success haptic
+                try {
+                    Haptics.notification({"type": "success"});
+                } except Exception as e {
+                    ;
+                }
+                
+                setDecisions(lambda prev: list -> list {
+                    return prev.slice(-9).concat([{
+                        "type": "log",
+                        "message": "Safety verified - passcode correct",
+                        "priority": 1,
+                        "source": "safety_monitor"
+                    }]);
+                });
+            } else {
+                # Wrong passcode
+                attempts = passcodeAttempts + 1;
+                setPasscodeAttempts(attempts);
+                setPasscodeInput("");
+                
+                # Error haptic
+                try {
+                    Haptics.notification({"type": "error"});
+                } except Exception as e {
+                    ;
+                }
+                
+                if attempts >= 3 {
+                    # Too many attempts - escalate
+                    print("SAFETY: 3 failed attempts - escalating");
+                    
+                    if passcodeTimerRef.current {
+                        clearInterval(passcodeTimerRef.current);
+                        passcodeTimerRef.current = None;
+                    }
+                    
+                    setShowPasscodeChallenge(False);
+                    setPasscodeError("");
+                    
+                    setDecisions(lambda prev: list -> list {
+                        return prev.slice(-9).concat([{
+                            "type": "trigger",
+                            "message": "3 failed passcode attempts - initiating emergency call",
+                            "priority": 3,
+                            "source": "safety_monitor"
+                        }]);
+                    });
+                    
+                    start_emergency_countdown_from_passcode();
+                } else {
+                    setPasscodeError("Wrong passcode. " + String(3 - attempts) + " attempts remaining.");
+                }
+            }
+        }
+        
+        def cancel_passcode_challenge -> None {
+            # Docstring removed
+            if passcodeTimerRef.current {
+                clearInterval(passcodeTimerRef.current);
+                passcodeTimerRef.current = None;
+            }
+            setShowPasscodeChallenge(False);
+            setPasscodeInput("");
+            setPasscodeCountdown(0);
+            setPasscodeError("");
+            setPasscodeAttempts(0);
+        }
+
+        # ============ DEMO TIMER FUNCTIONS ============
+
+        def start_demo_timer -> None {
+            # Docstring removed
+            print("DEMO: Starting 6-second demo timer");
+            
+            setDemoCountdown(6);
+            
+            # Haptic feedback
+            try {
+                Haptics.vibrate({"duration": 300});
+            } except Exception as e {
+                ;
+            }
+            
+            demoTimerRef.current = setInterval(
+                lambda -> None {
+                    setDemoCountdown(lambda prev: int -> int {
+                        if prev <= 1 {
+                            clearInterval(demoTimerRef.current);
+                            demoTimerRef.current = None;
+                            print("DEMO: Timer complete - calling emergency contact");
+                            execute_emergency_call();
+                            return 0;
+                        }
+                        # Vibrate each second
+                        try {
+                            Haptics.vibrate({"duration": 100});
+                        } except Exception as e {
+                            ;
+                        }
+                        return prev - 1;
+                    });
+                },
+                1000
+            );
+            
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "alert",
+                    "message": "Demo mode: Emergency call in 6 seconds",
+                    "priority": 3,
+                    "source": "demo"
+                }]);
+            });
+        }
+        
+        def cancel_demo_timer -> None {
+            # Docstring removed
+            if demoTimerRef.current {
+                clearInterval(demoTimerRef.current);
+                demoTimerRef.current = None;
+            }
+            setDemoCountdown(0);
+            
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "log",
+                    "message": "Demo timer cancelled",
+                    "priority": 1,
+                    "source": "demo"
                 }]);
             });
         }
@@ -1059,37 +1331,60 @@ cl {
         }
 
         async def simulate_sensor_event -> None {
+            # Docstring removed
+            print("KIDNAP SIMULATION: Starting kidnap scenario simulation");
+            
+            # Simulate erratic gyroscope data indicating struggle
+            # Based on BACKEND.md: variance > 1.5 rad/s² on 2+ axes = struggle
             mock_motion = {
                 "acceleration": {
-                    "x": 7.2,
-                    "y": 5.1,
-                    "z": 9.4
+                    "x": 12.5,  # Higher than normal - being jostled
+                    "y": 8.3,
+                    "z": 15.2
                 },
                 "rotationRate": {
-                    "alpha": 35.0,
-                    "beta": 18.0,
-                    "gamma": 11.0
+                    # High variance values indicating struggle
+                    "alpha": 85.0,  # Erratic rotation
+                    "beta": 72.0,
+                    "gamma": 63.0
                 },
                 "timestamp": Date.now()
             };
             motionRef.current = mock_motion;
             lastMotionRef.current = mock_motion;
-            if not geolocationRef.current {
-                geolocationRef.current = {
-                    "lat": 37.774900,
-                    "lng": -122.419400,
-                    "alt": 15.0,
-                    "speed": 3.2,
-                    "accuracy": 8.0
-                };
-            }
+            
+            # Set location to unfamiliar area (far from normal locations)
+            # Based on BACKEND.md: >2km from centroid = medium concern
+            geolocationRef.current = {
+                "lat": 37.8100,   # ~4km from normal centroid (37.7749)
+                "lng": -122.4700,
+                "alt": 5.0,
+                "speed": 15.5,  # Moving fast (in a vehicle?)
+                "accuracy": 15.0
+            };
             emit_data();
-
-            decision = await decide_motion_with_walker(mock_motion, agentConfig, True);
-            if decision and decision.priority > 0 {
-                await handleAction(decision);
+            
+            # Log the struggle detection
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "alert",
+                    "message": "⚠️ KIDNAP SCENARIO: Struggle detected + Location anomaly (4km from safe zone)",
+                    "priority": 3,
+                    "source": "safety_monitor"
+                }]);
+            });
+            
+            # Haptic alert
+            try {
+                Haptics.vibrate({"duration": 800});
+            } except Exception as e {
+                ;
             }
-            await evaluate_rules_and_act(mock_motion, "simulate");
+            
+            # Start passcode challenge (as per BACKEND.md section 7.2)
+            # Medium/High concern from struggle + location = passcode_challenge
+            print("KIDNAP SIMULATION: Triggering passcode challenge");
+            start_passcode_challenge();
         }
 
         def emit_data -> None {
@@ -1315,6 +1610,9 @@ cl {
 
             startDecisionLoop();
             setAgentRunning(True);
+
+            # Start demo timer - 6 seconds then emergency call
+            start_demo_timer();
 
             setSensorData({
                 "motion": None,
@@ -1703,6 +2001,176 @@ cl {
                 </div>;
         }
 
+        # Passcode challenge overlay (kidnap scenario)
+        passcodeOverlay = None;
+        if showPasscodeChallenge {
+            passcodeOverlay =
+                <div style={{
+                    "position": "fixed",
+                    "top": "0",
+                    "left": "0",
+                    "right": "0",
+                    "bottom": "0",
+                    "background": "rgba(234, 88, 12, 0.97)",
+                    "display": "flex",
+                    "flexDirection": "column",
+                    "alignItems": "center",
+                    "justifyContent": "center",
+                    "zIndex": "9999",
+                    "color": "#fff",
+                    "padding": "24px"
+                }}>
+                    <div style={{
+                        "fontSize": "20px",
+                        "fontWeight": "700",
+                        "marginBottom": "12px",
+                        "textAlign": "center"
+                    }}>
+                        ⚠️ SAFETY CHECK
+                    </div>
+                    <div style={{
+                        "fontSize": "16px",
+                        "marginBottom": "20px",
+                        "textAlign": "center",
+                        "maxWidth": "280px"
+                    }}>
+                        Unusual activity detected. Enter your passcode to confirm you're OK.
+                    </div>
+                    <div style={{
+                        "fontSize": "48px",
+                        "fontWeight": "800",
+                        "marginBottom": "20px"
+                    }}>
+                        {passcodeCountdown}s
+                    </div>
+                    <input
+                        type="password"
+                        placeholder="Enter passcode"
+                        value={passcodeInput}
+                        onChange={lambda e: Any -> None {
+                            setPasscodeInput(e.target.value);
+                        }}
+                        onKeyDown={lambda e: Any -> None {
+                            if e.key == "Enter" {
+                                verify_passcode(passcodeInput);
+                            }
+                        }}
+                        style={{
+                            "padding": "16px",
+                            "fontSize": "24px",
+                            "textAlign": "center",
+                            "border": "none",
+                            "borderRadius": "12px",
+                            "width": "200px",
+                            "marginBottom": "16px",
+                            "background": "#fff",
+                            "color": "#000"
+                        }}
+                        autoFocus={True}
+                    />
+                    {(
+                        <div style={{
+                            "color": "#fef08a",
+                            "marginBottom": "16px",
+                            "fontSize": "14px"
+                        }}>
+                            {passcodeError}
+                        </div>
+                    ) if passcodeError else None}
+                    <button
+                        onClick={lambda -> None { verify_passcode(passcodeInput); }}
+                        style={{
+                            "padding": "14px 48px",
+                            "fontSize": "18px",
+                            "fontWeight": "700",
+                            "background": "#fff",
+                            "color": "#ea580c",
+                            "border": "none",
+                            "borderRadius": "12px",
+                            "cursor": "pointer",
+                            "marginBottom": "12px"
+                        }}
+                    >
+                        VERIFY
+                    </button>
+                    <div style={{
+                        "marginTop": "16px",
+                        "fontSize": "13px",
+                        "opacity": "0.8",
+                        "textAlign": "center"
+                    }}>
+                        Emergency call will be placed if not verified
+                    </div>
+                </div>;
+        }
+
+        # Demo timer overlay (Start Agent button)
+        demoTimerOverlay = None;
+        if demoCountdown > 0 {
+            demoTimerOverlay =
+                <div style={{
+                    "position": "fixed",
+                    "top": "0",
+                    "left": "0",
+                    "right": "0",
+                    "bottom": "0",
+                    "background": "rgba(59, 130, 246, 0.95)",
+                    "display": "flex",
+                    "flexDirection": "column",
+                    "alignItems": "center",
+                    "justifyContent": "center",
+                    "zIndex": "9999",
+                    "color": "#fff",
+                    "padding": "24px"
+                }}>
+                    <div style={{
+                        "fontSize": "20px",
+                        "fontWeight": "700",
+                        "marginBottom": "16px",
+                        "textAlign": "center"
+                    }}>
+                        DEMO MODE
+                    </div>
+                    <div style={{
+                        "fontSize": "96px",
+                        "fontWeight": "800",
+                        "marginBottom": "24px"
+                    }}>
+                        {demoCountdown}
+                    </div>
+                    <div style={{
+                        "fontSize": "16px",
+                        "marginBottom": "32px",
+                        "textAlign": "center",
+                        "maxWidth": "280px"
+                    }}>
+                        Emergency call to {emergency_contact_name()} in {demoCountdown} seconds
+                    </div>
+                    <button
+                        onClick={cancel_demo_timer}
+                        style={{
+                            "padding": "16px 48px",
+                            "fontSize": "18px",
+                            "fontWeight": "700",
+                            "background": "#fff",
+                            "color": "#3b82f6",
+                            "border": "none",
+                            "borderRadius": "12px",
+                            "cursor": "pointer"
+                        }}
+                    >
+                        CANCEL
+                    </button>
+                    <div style={{
+                        "marginTop": "24px",
+                        "fontSize": "14px",
+                        "opacity": "0.8"
+                    }}>
+                        Phone: {emergency_contact()}
+                    </div>
+                </div>;
+        }
+
         statusClass = "#22c55e" if isTracking else "#888";
 
         return
@@ -2087,6 +2555,8 @@ cl {
                     </section>
                 </main>
                 {fallOverlay}
+                {passcodeOverlay}
+                {demoTimerOverlay}
             </div>;
     }
 }
