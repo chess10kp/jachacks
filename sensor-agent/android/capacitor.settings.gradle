@@ -2,8 +2,29 @@
 include ':capacitor-android'
 project(':capacitor-android').projectDir = new File('../node_modules/@capacitor/android/capacitor')
 
+include ':anuradev-capacitor-proximity'
+project(':anuradev-capacitor-proximity').projectDir = new File('../node_modules/@anuradev/capacitor-proximity/android')
+
+include ':capacitor-camera'
+project(':capacitor-camera').projectDir = new File('../node_modules/@capacitor/camera/android')
+
 include ':capacitor-device'
 project(':capacitor-device').projectDir = new File('../node_modules/@capacitor/device/android')
 
+include ':capacitor-geolocation'
+project(':capacitor-geolocation').projectDir = new File('../node_modules/@capacitor/geolocation/android')
+
 include ':capacitor-haptics'
 project(':capacitor-haptics').projectDir = new File('../node_modules/@capacitor/haptics/android')
+
+include ':capgo-capacitor-barometer'
+project(':capgo-capacitor-barometer').projectDir = new File('../node_modules/@capgo/capacitor-barometer/android')
+
+include ':capgo-capacitor-compass'
+project(':capgo-capacitor-compass').projectDir = new File('../node_modules/@capgo/capacitor-compass/android')
+
+include ':capgo-capacitor-pedometer'
+project(':capgo-capacitor-pedometer').projectDir = new File('../node_modules/@capgo/capacitor-pedometer/android')
+
+include ':mozartec-capacitor-microphone'
+project(':mozartec-capacitor-microphone').projectDir = new File('../node_modules/@mozartec/capacitor-microphone/android')

@@ -9,8 +9,15 @@ android {
 
 apply from: "../capacitor-cordova-android-plugins/cordova.variables.gradle"
 dependencies {
+    implementation project(':anuradev-capacitor-proximity')
+    implementation project(':capacitor-camera')
     implementation project(':capacitor-device')
+    implementation project(':capacitor-geolocation')
     implementation project(':capacitor-haptics')
+    implementation project(':capgo-capacitor-barometer')
+    implementation project(':capgo-capacitor-compass')
+    implementation project(':capgo-capacitor-pedometer')
+    implementation project(':mozartec-capacitor-microphone')
 
 }
 

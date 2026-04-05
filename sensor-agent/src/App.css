@@ -85,9 +85,10 @@ main {
 
 .sensor-status {
   display: flex;
-  gap: 12px;
+  gap: 8px;
   margin-bottom: 12px;
-  font-size: 12px;
+  font-size: 11px;
+  flex-wrap: wrap;
 }
 
 .sensor-status .available {
@@ -107,6 +108,48 @@ main {
   margin-top: 4px;
   padding-top: 8px;
   border-top: 1px dashed var(--border);
+}
+
+.sensor-data .data-row.full {
+  flex: 1 1 100%;
+  flex-direction: row;
+  justify-content: space-between;
+}
+
+.device-info .data-row {
+  font-size: 11px;
+}
+
+.camera-btn {
+  width: 100%;
+  padding: 12px;
+  margin-top: 12px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  background: #3b82f6;
+  color: #fff;
+  cursor: pointer;
+}
+
+.photo-taken {
+  font-size: 11px;
+  color: var(--accent);
+  text-align: center;
+  margin-top: 8px;
+}
+
+.mic-btn {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  background: #8b5cf6;
+  color: #fff;
+  cursor: pointer;
 }
 
 .data-row {

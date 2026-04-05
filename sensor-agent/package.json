@@ -10,11 +10,18 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@anuradev/capacitor-proximity": "^7.0.1",
     "@capacitor/android": "^8.3.0",
+    "@capacitor/camera": "^8.0.2",
     "@capacitor/core": "^8.3.0",
     "@capacitor/device": "^8.0.2",
+    "@capacitor/geolocation": "^8.2.0",
     "@capacitor/haptics": "^8.0.2",
     "@capacitor/motion": "^8.0.0",
+    "@capgo/capacitor-barometer": "^8.0.10",
+    "@capgo/capacitor-compass": "^8.1.11",
+    "@capgo/capacitor-pedometer": "^8.0.23",
+    "@mozartec/capacitor-microphone": "^7.1.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
