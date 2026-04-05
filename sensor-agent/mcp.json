@@ -1,7 +1,0 @@
-{
-  "jac": {
-    "type": "local",
-    "command": ["jac", "mcp"],
-    "enabled": true
-  }
-}
