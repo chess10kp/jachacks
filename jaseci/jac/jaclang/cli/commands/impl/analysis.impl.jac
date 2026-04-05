@@ -1,0 +1,727 @@
+"""Implementation of analysis commands (check, lint, format, test, gen_parser).
+
+Direct implementations - no delegation to cli.jac.
+"""
+
+import from pathlib { Path }
+import from fnmatch { fnmatch }
+import from jaclang.cli.console { console }
+import from jaclang.cli.check_report {
+    print_file_progress,
+    print_failures,
+    print_failed_summary,
+    print_final_summary
+}
+
+"""Run type checker for specified .jac files."""
+impl check(
+    paths: list,
+    print_errs: bool = True,
+    ignore: list = [],
+    parse_only: bool = False,
+    nowarn: bool = False
+) -> int {
+    import from jaclang.jac0core.program { JacProgram }
+    import from time { time }
+    if isinstance(paths, str) {
+        paths = [paths];
+    }
+    start_time = time();
+    ignore_list = _normalize_ignore_patterns(ignore);
+    # Helper to process and store single file result
+    def process_file_result(file_path: str, idx: int, total: int) -> None {
+        nonlocal total_files , total_errors , total_warnings , failed_files;
+        total_files += 1;
+        (success, errs, warns, errors_list, warnings_list) = check_single_file(
+            prog, file_path
+        );
+        total_errors += errs;
+        total_warnings += warns;
+
+        # Print progress line
+        print_file_progress(file_path, success, idx, total);
+
+        if not success {
+            failed_files += 1;
+        }
+        if not success or (warns > 0 and not nowarn) {
+            failed_results.append(
+                {'path': file_path, 'errors': errors_list, 'warnings': warnings_list}
+            );
+        }
+    }
+    # Store failed file results for later detailed output
+    failed_results: list[dict] = [];
+    def check_single_file(
+        prog: JacProgram, file_path: str
+    ) -> tuple[bool, int, int, list, list] {
+        import os;
+        import from jaclang.jac0core.bccache { discover_base_file }
+        path_obj = Path(file_path);
+        if not path_obj.exists() {
+            console.error(f"File '{file_path}' does not exist.");
+            return (False, 1, 0, [], []);
+        }
+        # If the file is an annex (.impl.jac or .test.jac), compile the base
+        # file instead so the full annex pipeline runs (DeclImplMatchPass, etc.).
+        # Then filter errors/warnings to only those originating from the annex file.
+        annex_filter_path: (str | None) = None;
+        base_path = discover_base_file(file_path);
+        if base_path is not None {
+            annex_filter_path = os.path.realpath(file_path);
+            file_path = base_path;
+        }
+        try {
+            import from jaclang.jac0core.compile_options { CompileOptions }
+            console.print(f"  Checking {file_path}...");
+            (err_start, warn_start) = (len(prog.errors_had), len(prog.warnings_had));
+            prog.compile(
+                file_path=file_path,
+                options=CompileOptions(
+                    type_check=not parse_only, no_cgen=True, force_target_program=True
+                )
+            );
+            new_errors = prog.errors_had[err_start:];
+            new_warnings = prog.warnings_had[warn_start:];
+            # Filter out errors/warnings from ignored files and non-.jac files
+            # By default, only show errors from .jac files (not from Python stdlib, stubs, etc.)
+            # TODO: This is ad-hoc, need proper error handling across
+            # different file types; will be addressed in future refactor.
+            def filter_issues(issues: list) -> list {
+                return [
+                    i
+                    for i in issues
+                    if i.loc
+                    and i.loc.mod_path
+                    and i.loc.mod_path.endswith(".jac")
+                    and not any(p in i.loc.mod_path for p in ignore_list)
+                ];
+            }
+            filtered_errors = filter_issues(new_errors);
+            filtered_warnings = filter_issues(new_warnings);
+            # If checking an annex file, further filter to only errors from that file
+            if annex_filter_path is not None {
+                filtered_errors = [
+                    e
+                    for e in filtered_errors
+                    if e.loc and e.loc.mod_path == annex_filter_path
+                ];
+                filtered_warnings = [
+                    w
+                    for w in filtered_warnings
+                    if w.loc and w.loc.mod_path == annex_filter_path
+                ];
+            }
+            err_count = len(filtered_errors);
+            warn_count = len(filtered_warnings);
+
+            return (
+                err_count == 0,
+                err_count,
+                warn_count,
+                filtered_errors,
+                filtered_warnings
+            );
+        } except Exception as e {
+            console.error(f"Error checking '{file_path}': {e}");
+            return (False, 1, 0, [], []);
+        }
+    }
+    total_files = failed_files=total_errors=total_warnings=0;
+    prog = JacProgram();
+    (all_files, had_path_errors) = _iter_jac_files(paths, ignore_list);
+    total_to_check = len(all_files);
+    for (idx, jac_file_path) in enumerate(all_files, 1) {
+        process_file_result(jac_file_path, idx, total_to_check);
+    }
+    # Print FAILURES section and summary
+    if print_errs and len(failed_results) > 0 {
+        print_failures(failed_results, nowarn);
+    }
+    if failed_files > 0 {
+        print_failed_summary(failed_results);
+    }
+    # Print final summary line
+    elapsed = time() - start_time;
+    print_final_summary(total_files - failed_files, failed_files, elapsed);
+    return 1 if (total_errors > 0 or had_path_errors) else 0;
+}
+
+"""Lint .jac files and report violations."""
+impl lint(paths: list, fix: bool = False, ignore: list = []) -> int {
+    import from jaclang.jac0core.program { JacProgram }
+    if isinstance(paths, str) {
+        paths = [paths];
+    }
+    ignore_list = _normalize_ignore_patterns(ignore);
+    def lint_report_file(file_path: str) -> tuple[bool, int] {
+        # Lint-only: report errors without formatting or writing files
+        path_obj = Path(file_path);
+        if not path_obj.exists() {
+            console.error(f"File '{file_path}' does not exist.");
+            return (False, 1);
+        }
+        console.print(f"  Linting {file_path}...");
+        try {
+            prog = JacProgram.jac_file_linter(str(path_obj));
+            error_count = 0;
+            for error in prog.errors_had {
+                console.error(f"{error}");
+                error_count += 1;
+            }
+            return (True, error_count);
+        } except Exception as e {
+            console.error(f"Error linting '{file_path}': {e}");
+            return (False, 1);
+        }
+    }
+    def lint_fix_file(file_path: str) -> tuple[bool, int, int] {
+        # Lint+fix: apply fixes and write files back
+        path_obj = Path(file_path);
+        if not path_obj.exists() {
+            console.error(f"File '{file_path}' does not exist.");
+            return (False, 1, 1);
+        }
+        console.print(f"  Lint-fixing {file_path}...");
+        try {
+            prog = JacProgram.jac_file_formatter(str(path_obj), auto_lint=True);
+            try {
+                formatted_code = prog.mod.main.gen.jac;
+                original_code = prog.mod.main.source.code;
+            } except Exception {
+                for error in prog.errors_had {
+                    console.error(f"{error}");
+                }
+                err_count = len(prog.errors_had) or 1;
+                return (False, err_count, err_count);
+            }
+            # Block on comment displacement errors (formatter bug)
+            has_format_error = any(
+                e.code is not None and e.code.code == "E5051" for e in prog.errors_had
+            );
+            if has_format_error {
+                for error in prog.errors_had {
+                    console.error(f"{error}");
+                }
+                err_count = len(prog.errors_had);
+                return (False, err_count, err_count);
+            }
+            # Count fixed warnings and unfixable errors
+            fixed_count = 0;
+            unfixable_count = 0;
+            for warning in prog.warnings_had {
+                console.warning(f"{warning}");
+                fixed_count += 1;
+            }
+            for error in prog.errors_had {
+                console.error(f"{error}");
+                unfixable_count += 1;
+            }
+            error_count = fixed_count + unfixable_count;
+            # Write if there were lint violations that were fixed
+            if fixed_count > 0 {
+                changed = formatted_code != original_code;
+                if changed {
+                    with open(str(path_obj), 'w', encoding='utf-8') as f {
+                        f.write(formatted_code);
+                    }
+                }
+                for impl_mod in prog.mod.main.impl_mod {
+                    impl_path = impl_mod.loc.mod_path;
+                    impl_formatted = impl_mod.gen.jac;
+                    impl_original = impl_mod.source.code;
+                    if (impl_formatted != impl_original) {
+                        with open(impl_path, 'w', encoding='utf-8') as f {
+                            f.write(impl_formatted);
+                        }
+                    }
+                }
+            }
+            return (True, error_count, unfixable_count);
+        } except Exception as e {
+            console.error(f"Error linting '{file_path}': {e}");
+            return (False, 1, 1);
+        }
+    }
+    total_files = 0;
+    failed_files = 0;
+    total_errors = 0;
+    total_unfixable = 0;
+    (all_files, had_path_errors) = _iter_jac_files(paths, ignore_list);
+    for file_path in all_files {
+        total_files += 1;
+        if fix {
+            (success, errors, unfixable) = lint_fix_file(file_path);
+            total_unfixable += unfixable;
+        } else {
+            (success, errors) = lint_report_file(file_path);
+        }
+        total_errors += errors;
+        if not success {
+            failed_files += 1;
+        }
+    }
+    failing_errors = total_unfixable if fix else total_errors;
+    if fix and total_errors > 0 {
+        fixed_count = total_errors - total_unfixable;
+        parts: list[str] = [];
+        if fixed_count > 0 {
+            parts.append(f"{fixed_count} fixed");
+        }
+        if total_unfixable > 0 {
+            parts.append(f"{total_unfixable} unfixable");
+        }
+        detail = ", ".join(parts);
+        summary_msg = f"Linted {total_files} '.jac' files: {total_errors} errors ({detail}).";
+    } else {
+        summary_msg = f"Linted {total_files} '.jac' files: {total_errors} errors found.";
+    }
+    if failing_errors > 0 or had_path_errors {
+        console.error(summary_msg);
+        return 1;
+    }
+    console.success(summary_msg);
+    return 0;
+}
+
+"""Format a single .jac file (standalone for parallel execution).
+
+Returns dict with: path, success, changed, errors, syntax_errors, warnings_strs, errors_strs,
+and optionally formatted_code/impl_results for deferred writes.
+"""
+def _format_single_file_worker(file_path: str, lintfix: bool, check: bool) -> dict {
+    import from jaclang.jac0core.program { JacProgram }
+    path_obj = Path(file_path);
+    result: dict = {
+        'path': file_path,
+        'success': False,
+        'changed': False,
+        'errors': 0,
+        'syntax_errors': [],
+        'warnings_strs': [],
+        'errors_strs': [],
+        'formatted_code': None,
+        'impl_results': []
+    };
+    if not path_obj.exists() {
+        result['syntax_errors'] = [f"File '{file_path}' does not exist."];
+        return result;
+    }
+    try {
+        prog = JacProgram.jac_file_formatter(str(path_obj), auto_lint=lintfix);
+        if prog.errors_had {
+            has_format_error = any(
+                e.code is not None and e.code.code == "E5051" for e in prog.errors_had
+            );
+            if has_format_error or not lintfix {
+                result['syntax_errors'] = [str(e) for e in prog.errors_had];
+                return result;
+            }
+        }
+        try {
+            formatted_code = prog.mod.main.gen.jac;
+            original_code = prog.mod.main.source.code;
+            if not formatted_code or len(formatted_code.strip()) == 0 {
+                if prog.errors_had {
+                    result['syntax_errors'] = [str(e) for e in prog.errors_had];
+                    return result;
+                }
+            }
+            changed = formatted_code != original_code;
+            result['changed'] = changed;
+            # Store formatted code for writing later (if not check mode)
+            if changed and not check {
+                result['formatted_code'] = formatted_code;
+            }
+            # Check impl modules
+            for impl_mod in prog.mod.main.impl_mod {
+                impl_path = impl_mod.loc.mod_path;
+                impl_formatted = impl_mod.gen.jac;
+                impl_original = impl_mod.source.code;
+                if impl_formatted != impl_original {
+                    result['changed'] = True;
+                    if not check {
+                        result['impl_results'].append((impl_path, impl_formatted));
+                    }
+                }
+            }
+        } except Exception {
+            result['syntax_errors'] = [str(e) for e in prog.errors_had];
+            return result;
+        }
+        # Collect warnings/errors as strings for later printing
+        lint_errors = 0;
+        if lintfix {
+            for warning in prog.warnings_had {
+                result['warnings_strs'].append(str(warning));
+            }
+            for error in prog.errors_had {
+                result['errors_strs'].append(str(error));
+                lint_errors += 1;
+            }
+        }
+        result['success'] = True;
+        result['errors'] = lint_errors;
+        return result;
+    } except Exception as e {
+        result['syntax_errors'] = [f"Error formatting '{file_path}': {e}"];
+        return result;
+    }
+}
+
+"""Format .jac files with improved code style."""
+impl format(
+    paths: list, to_screen: bool = False, lintfix: bool = False, check: bool = False
+) -> int {
+    import from concurrent.futures { ProcessPoolExecutor, as_completed }
+    import os;
+    if isinstance(paths, str) {
+        paths = [paths];
+    }
+    # Track unformatted files for check mode
+    unformatted_files: list[str] = [];
+    failed_results: list = [];
+
+    (all_files, had_path_errors) = _iter_jac_files(paths);
+    total_files = len(all_files);
+
+    if total_files == 0 {
+        return 1 if had_path_errors else 0;
+    }
+
+    # Use parallel processing for multiple files (unless outputting to screen)
+    use_parallel = total_files > 1 and not to_screen;
+    max_workers = min(os.cpu_count() or 4, total_files, 8);
+
+    results: list[dict] = [];
+
+    if use_parallel {
+        try {
+            import multiprocessing as mp;
+            ctx = mp.get_context("fork") if os.name != "nt" else None;
+            pool_cls = (
+                ProcessPoolExecutor
+                    if ctx is None
+                    else lambda **kw : ProcessPoolExecutor(mp_context=ctx, **kw)
+            );
+            with pool_cls(max_workers=max_workers) as executor {
+                futures = {
+                    executor.submit(_format_single_file_worker, fp, lintfix, check): fp
+                    for fp in all_files
+                };
+                completed = 0;
+                for future in as_completed(futures) {
+                    completed += 1;
+                    fp = futures[future];
+                    console.print(
+                        f"Formatting [{completed}/{total_files}] completed..."
+                    );
+                    try {
+                        results.append(future.result());
+                    } except Exception as e {
+                        results.append(
+                            {
+                                'path': fp,
+                                'success': False,
+                                'changed': False,
+                                'errors': 0,
+                                'syntax_errors': [f"Worker error: {e}"],
+                                'warnings_strs': [],
+                                'errors_strs': [],
+                                'formatted_code': None,
+                                'impl_results': []
+                            }
+                        );
+                    }
+                }
+            }
+        } except Exception {
+            # Fall back to sequential processing if multiprocessing fails
+            use_parallel = False;
+        }
+    }
+    if not use_parallel {
+        # Single file: show filename
+        for fp in all_files {
+            console.print(f"Formatting {fp}...");
+            results.append(_format_single_file_worker(fp, lintfix, check));
+        }
+    }
+
+    # Process results: write files, print messages, aggregate stats
+    failed_files = 0;
+    changed_files = 0;
+    total_errors = 0;
+
+    for res in results {
+        # Print warnings/errors from this file
+        for w in res['warnings_strs'] {
+            console.warning(w);
+        }
+        for e in res['errors_strs'] {
+            console.error(e);
+        }
+
+        total_errors += res['errors'];
+
+        if not res['success'] {
+            failed_files += 1;
+            failed_results.append(
+                {'path': res['path'], 'errors': res['syntax_errors'], 'warnings': []}
+            );
+        } elif res['changed'] {
+            changed_files += 1;
+            if check {
+                unformatted_files.append(res['path']);
+            } else {
+                # Write formatted code
+                if res['formatted_code'] is not None {
+                    try {
+                        if to_screen {
+                            console.print(res['formatted_code']);
+                        } else {
+                            with open(res['path'], 'w', encoding='utf-8') as f {
+                                f.write(res['formatted_code']);
+                            }
+                        }
+                    } except Exception as e {
+                        console.error(f"Error writing to '{res['path']}': {e}");
+                    }
+                }
+                # Write impl files
+                for (impl_path, impl_code) in res['impl_results'] {
+                    try {
+                        if to_screen {
+                            console.print(impl_code);
+                        } else {
+                            with open(impl_path, 'w', encoding='utf-8') as f {
+                                f.write(impl_code);
+                            }
+                        }
+                    } except Exception as e {
+                        console.error(f"Error writing to '{impl_path}': {e}");
+                    }
+                }
+            }
+        }
+    }
+    # Print syntax error summary grouped by file
+    # Note: errors are strings (for multiprocessing), not Alert objects
+    if failed_results {
+        import from jaclang.cli.check_report { separator }
+        console.print("");
+        console.print(separator("FAILURES"));
+        for r in failed_results {
+            console.print(separator(str(r['path']), char='_'));
+            for e in r['errors'] {
+                console.error(e);  # Already a string
+            }
+            console.print("");
+        }
+        print_failed_summary(failed_results);
+    }
+    # In check mode, report all issues together
+    if check {
+        has_errors = False;
+        if len(unformatted_files) > 0 {
+            console.error("The following files are not properly formatted:");
+            for file in unformatted_files {
+                console.error(f"  jac format --lintfix {file}");
+            }
+            has_errors = True;
+        }
+        if failed_files > 0 {
+            console.error(
+                f"\n{failed_files} file(s) have syntax errors (see errors above)."
+            );
+            console.error(
+                "Fix the syntax errors or rename files with '*_err.jac' suffix to exclude them."
+            );
+            has_errors = True;
+        }
+        if has_errors {
+            return 1;
+        }
+        if (len(paths) == 1) and Path(paths[0]).is_dir() {
+            console.success(
+                f"Checked {total_files}/{total_files} '.jac' files - all formatted correctly."
+            );
+        }
+        return 0;
+    }
+    # Non-check mode summary
+    if (((len(paths) == 1) and Path(paths[0]).is_dir()) or (failed_files > 0)) {
+        summary_msg = f"Formatted {(total_files - failed_files)}/{total_files} '.jac' files ({changed_files} changed).";
+        if failed_files > 0 {
+            console.error(summary_msg);
+        } else {
+            console.success(summary_msg);
+        }
+    }
+    if failed_files > 0 or had_path_errors {
+        return 1;
+    }
+    if total_errors > 0 {
+        return 1;
+    }
+    if changed_files > 0 {
+        return 1;
+    }
+    return 0;
+}
+
+"""Run the test suite in the specified .jac file or directory."""
+impl `test(
+    filepath: str = "",
+    test_name: str = "",
+    filter: str = "",
+    xit: bool = False,
+    maxfail: int = None,
+    directory: str = "",
+    verbose: bool = False
+) -> int {
+    import from jaclang.jac0core.runtime { JacRuntime as Jac }
+    Jac.setup();
+    # e.g. jac test --test_name "typevar7 constrained operations"  (no filepath given)
+    if (test_name and not filepath) {
+        console.error(
+            "Error: --test_name requires a filepath. "
+            "Running by name across all files is ambiguous.\n"
+            "Usage: jac test <file.jac> --test_name <name>"
+        );
+        return 1;
+    }
+    # e.g. jac test test_typevar.jac  (run from wrong directory)
+    if (filepath and not Path(filepath).exists()) {
+        console.error(
+            f"Error: File not found: '{filepath}'\n"
+            "Make sure you are in the correct directory or provide the full path.\n"
+            f"Usage: jac test /full/path/to/{filepath}"
+        );
+        return 1;
+    }
+    normalized_name = test_name.strip().replace(' ', '_') if test_name else '';
+    failcount = Jac.run_test(
+        filepath=filepath,
+        func_name=('test_' + normalized_name) if normalized_name else None,
+        filter=filter,
+        xit=xit,
+        maxfail=maxfail,
+        directory=directory,
+        verbose=verbose
+    );
+    if failcount {
+        console.error(f"Tests failed: {failcount}");
+        return 1;
+    }
+    return 0;
+}
+
+"""Generate static parser."""
+impl gen_parser -> int {
+    import from jaclang.compiler { gen_all_parsers }
+    gen_all_parsers();
+    console.success('Parser generated.');
+    return 0;
+}
+
+"""Extract grammar from the Jac parser."""
+impl grammar(lark: bool = False, output: str = "") -> int {
+    import from jaclang.jac0core.program { JacProgram }
+    import from jaclang.compiler.passes.tool.grammar_extract_pass { GrammarExtractPass }
+    import jaclang;
+    parser_path = str(
+        Path(jaclang.__file__).parent / "jac0core" / "parser" / "parser.jac"
+    );
+    prog = JacProgram();
+    mod = prog.compile(parser_path, no_cgen=True);
+    if prog.errors_had {
+        console.error("Failed to compile parser module.");
+        for e in prog.errors_had {
+            console.error(f"  {e}");
+        }
+        return 1;
+    }
+    pass_ = GrammarExtractPass(ir_in=mod, prog=prog);
+    if len(pass_.rules) == 0 {
+        console.error("No grammar rules extracted.");
+        return 1;
+    }
+    text = pass_.emit_lark() if lark else pass_.emit_ebnf();
+    if output {
+        with open(output, "w", encoding="utf-8") as f {
+            f.write(text);
+            f.write("\n");
+        }
+        fmt_name = "Lark" if lark else "EBNF";
+        console.success(
+            f"{fmt_name} grammar ({len(pass_.rules)} rules) written to {output}"
+        );
+    } else {
+        console.print(text);
+    }
+    return 0;
+}
+
+"""Iterate over .jac files from a list of paths (files or directories).
+
+Expands directories recursively, filters by ignore patterns.
+Returns (file_list, had_errors) where had_errors is True if any path was invalid.
+"""
+def _iter_jac_files(paths: list, ignore_list: list = []) -> tuple[list[str], bool] {
+    result: list[str] = [];
+    had_errors = False;
+    for path in paths {
+        path_obj = Path(path);
+        if path.endswith('.jac') {
+            if not _should_ignore(path, ignore_list) {
+                result.append(path);
+            }
+        } elif path_obj.is_dir() {
+            for jac_file in path_obj.glob('**/*.jac') {
+                if not jac_file.is_file() {
+                    continue;
+                }
+                if not _should_ignore(str(jac_file), ignore_list) {
+                    result.append(str(jac_file));
+                }
+            }
+        } else {
+            console.error(f"'{path}' is not a .jac file or directory.");
+            had_errors = True;
+        }
+    }
+    return (result, had_errors);
+}
+
+"""Normalize ignore patterns by stripping whitespace and trailing slashes."""
+def _normalize_ignore_patterns(ignore: list) -> list {
+    normalized = [];
+    for p in (ignore or []) {
+        stripped = p.strip();
+        if stripped {
+            normalized.append(stripped.rstrip('/'));
+        }
+    }
+    return normalized;
+}
+
+"""Check if a file path should be ignored based on patterns.
+Supports both exact matches and wildcard patterns (e.g., 'jac-*').
+"""
+def _should_ignore(file_path: str, ignore_patterns: list) -> bool {
+    if not ignore_patterns {
+        return False;
+    }
+    path_parts = Path(file_path).parts;
+    # Patterns are already normalized in ignore_list
+    for pattern in ignore_patterns {
+        # fnmatch handles both exact and wildcard matches
+        for part in path_parts {
+            if fnmatch(part, pattern) {
+                return True;
+            }
+        }
+    }
+    return False;
+}

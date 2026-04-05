@@ -1,0 +1,159 @@
+"""
+Functions that operate on Type objects.
+
+PyrightReference: packages/pyright-internal/src/analyzer/typeUtils.ts
+"""
+import from enum { Enum }
+import jaclang.jac0core.unitree as uni;
+import from jaclang.jac0core.constant { Tokens as Tok }
+import from jaclang.jac0core.unitree { Symbol }
+import from . { types }
+"""Represents a member of a class."""
+obj ClassMember {
+    has symbol: Symbol,
+        class_type: types.ClassType,
+        overloads: list[Symbol],
+        is_instance_member: bool = True,
+        is_class_member: bool = False,
+        is_slots_member: bool = False,
+        is_class_var: bool = False,
+        is_read_only: bool = False,
+        is_type_declared: bool = False,
+        skipped_undeclared_type: bool = False;
+}
+
+def compute_mro_linearization(cls: types.ClassType) -> None;
+
+"""
+Tracks parameter assignments for function calls.
+
+    This class helps in tracking which parameters have been matched
+    with arguments in a function call. It supports positional, named,
+    *args, and **kwargs arguments.
+"""
+obj ParamAssignmentTracker {
+    has params: list[types.Parameter],
+        curr_param_idx: int = 0,
+        matched_params: set[types.Parameter] = set(),
+        varargs: (types.Parameter | None) = None,
+        kwargs: (types.Parameter | None) = None;
+
+    def postinit -> None;
+    def lookup_named_parameter(param_name: str) -> (types.Parameter | None);
+    def _mark_all_named_params_as_matched -> None;
+    def _mark_all_positional_params_as_matched -> None;
+    def match_named_argument(arg: uni.KWPair) -> (types.Parameter | None);
+    def match_positional_argument(arg: uni.Expr) -> (types.Parameter | None);
+    def get_unmatched_required_params -> list[types.Parameter];
+}
+
+"""A completion item."""
+obj CompletionItem {
+    has label: str,
+        kind: int,
+        detail: (str | None) = None;
+}
+
+"""The kind of a completion entry."""
+enum CompletionItemKind {
+    Text = 1,
+    Method = 2,
+    Function = 3,
+    Constructor = 4,
+    Field = 5,
+    Variable = 6,
+    Class = 7,
+    Interface = 8,
+    Module = 9,
+    Property = 10,
+    Unit = 11,
+    Value = 12,
+    Enum = 13,
+    Keyword = 14,
+    Snippet = 15,
+    Color = 16,
+    File = 17,
+    Reference = 18,
+    Folder = 19,
+    EnumMember = 20,
+    Constant = 21,
+    Struct = 22,
+    Event = 23,
+    Operator = 24,
+    TypeParameter = 25,
+}
+
+def completion_kind_from_sym(sym: Symbol) -> int;
+
+def get_completion_items(
+    ty: (types.TypeBase | uni.UniScopeNode)
+) -> list[CompletionItem];
+
+def lookup_symtab(
+    symtable: uni.UniScopeNode, name: str, builtins_to_inject: uni.Module
+) -> (Symbol | None);
+
+def class_implements_protocol(
+    cls: types.ClassType, proto: types.ClassType, evaluator: Any = None
+) -> bool;
+
+"""
+Module source flags computed from file path.
+
+Similar to Pyright's SourceFileInfo flags (_isStubFile, _isTypingStubFile, etc.).
+These flags are computed once when a module is loaded and stored on ModuleType.
+"""
+obj ModuleSourceFlags {
+    has is_stub_file: bool = False,  # True if .pyi file
+        is_stdlib_stub: bool = False,  # True if from vendor/typeshed/stdlib/
+        is_typing_stub: bool = False,  # True if typing.pyi or typing_extensions.pyi
+        is_builtin_stub: bool = False;  # True if builtins.pyi, abc.pyi, etc.
+}
+
+def compute_module_source_flags(file_path: str) -> ModuleSourceFlags;
+
+# -------------------------------------------------------------------------
+# Type specialization utilities
+# -------------------------------------------------------------------------
+"""
+Convert a type to its instance form.
+
+- ClassType (instantiable) -> ClassType (instance)
+- UnionType -> converted members
+- Other types -> unchanged
+"""
+def convert_to_instance(ty: types.TypeBase) -> types.TypeBase;
+
+"""
+Apply type variable substitutions to a type.
+
+This is the unified function for TypeVar substitution. It handles:
+- Direct TypeVarType -> lookup in solution or class type_args
+- Self type -> class_type instance
+- Nested TypeVars in ClassType (e.g., tuple[int, T] -> tuple[int, Item])
+- UnionType -> specialize each member
+- FunctionType -> specialize parameters and return type
+"""
+def apply_solved_type_vars(
+    ty: types.TypeBase,
+    solution: dict[str, types.TypeBase],
+    class_type: (types.ClassType | None) = None
+) -> types.TypeBase;
+
+"""
+Build a cumulative TypeVar name -> concrete type mapping for a specialized class.
+
+Walks the MRO accumulating bindings so that inherited TypeVars are resolved
+transitively. Used by specialize_member_type and FunctionType.specialize.
+"""
+def build_type_var_solution(class_type: types.ClassType) -> dict[str, types.TypeBase];
+
+"""Build type_params → type_args mapping from a specialized class."""
+def build_solution_from_specialized_class(
+    class_type: types.ClassType
+) -> dict[str, types.TypeBase];
+
+"""Specialize a base class using type args from the derived class."""
+def specialize_for_base_class(
+    src_type: types.ClassType, base_class: types.ClassType
+) -> types.ClassType;

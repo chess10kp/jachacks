@@ -1,0 +1,474 @@
+"""
+Type system evaluator for JacLang.
+
+PyrightReference:
+    packages/pyright-internal/src/analyzer/typeEvaluator.ts
+    packages/pyright-internal/src/analyzer/typeEvaluatorTypes.ts
+"""
+
+import ast as py_ast;
+import os;
+import from pathlib { Path }
+import from typing { TYPE_CHECKING, cast }
+import jaclang.jac0core.unitree as uni;
+import from jaclang.jac0core.constant { TOKEN_MAP }
+import from jaclang.jac0core.constant { SymbolType, Tokens as Tok }
+import from jaclang.compiler.passes.main.pyast_load_pass { PyastBuildPass }
+import from jaclang.jac0core.passes.sym_tab_build_pass { SymTabBuildPass }
+import from jaclang.compiler.type_system { types }
+import from jaclang.runtimelib.utils { read_file_with_encoding }
+
+with entry {
+    if TYPE_CHECKING {
+        import from jaclang.jac0core.program { JacProgram }
+    }
+}
+
+# FIXME: Conver the bellow to dot import (from . import ...)
+# Currently its not possible with jac+python hybrid repos.
+import from jaclang.compiler.type_system { operations }
+import from jaclang.compiler.type_system { type_utils }
+import from jaclang.compiler.type_system { properties }
+import from jaclang.compiler.type_system.types { TypeBase }
+
+import from jaclang.jac0core.diagnostics {
+    DiagnosticInfo,
+    E1001,
+    E1002,
+    E1003,
+    E1004,
+    E1010,
+    E1011,
+    E1020,
+    E1021,
+    E1022,
+    E1023,
+    E1030,
+    E1031,
+    E1032,
+    E1033,
+    E1034,
+    E1035,
+    E1040,
+    E1041,
+    E1050,
+    E1051,
+    E1052,
+    E1053,
+    E1054,
+    E1056,
+    E1057,
+    E1060,
+    E1061,
+    E1062,
+    E1063,
+    E1064,
+    E1065,
+    E1070,
+    E1071,
+    E1072,
+    E1073,
+    E1080,
+    E1081,
+    E1090,
+    E1091,
+    E1092,
+    E1093,
+    E1094,
+    E1095,
+    E1096,
+    E1097,
+    E1098,
+    E1099,
+    W1100
+}
+
+"""Types whose definitions are prefetched and cached by the type evaluator."""
+obj PrefetchedTypes {
+    has none_type_class: TypeBase | None = None,
+        object_class: TypeBase | None = None,
+        type_class: TypeBase | None = None,
+        union_type_class: TypeBase | None = None,
+        awaitable_class: TypeBase | None = None,
+        function_class: TypeBase | None = None,
+        method_class: TypeBase | None = None,
+        tuple_class: TypeBase | None = None,
+        bool_class: TypeBase | None = None,
+        int_class: TypeBase | None = None,
+        float_class: TypeBase | None = None,
+        str_class: TypeBase | None = None,
+        bytes_class: TypeBase | None = None,
+        dict_class: TypeBase | None = None,
+        list_class: TypeBase | None = None,
+        module_type_class: TypeBase | None = None,
+        typed_dict_class: TypeBase | None = None,
+        typed_dict_private_class: TypeBase | None = None,
+        supports_keys_and_get_item_class: TypeBase | None = None,
+        mapping_class: TypeBase | None = None,
+        template_class: TypeBase | None = None,
+        type_var_class: TypeBase | None = None,
+        param_spec_class: TypeBase | None = None,
+        type_var_tuple_class: TypeBase | None = None,
+        classmethod_class: TypeBase | None = None,
+        # Prefetch from typing.pyi file
+        protocol_class: TypeBase | None = None,
+        any_class: TypeBase | None = None,
+        callable_class: TypeBase | None = None,
+        # Prefetched from jac_builtins.pyi file
+        final_class: TypeBase | None = None,
+        literal_string_class: TypeBase | None = None,
+        root_class: TypeBase | None = None,
+        node_class: TypeBase | None = None,
+        walker_class: TypeBase | None = None,
+        jsx_element_class: TypeBase | None = None,
+        # Fixed-width numeric types
+        i8_class: TypeBase | None = None,
+        u8_class: TypeBase | None = None,
+        i16_class: TypeBase | None = None,
+        u16_class: TypeBase | None = None,
+        i32_class: TypeBase | None = None,
+        u32_class: TypeBase | None = None,
+        i64_class: TypeBase | None = None,
+        u64_class: TypeBase | None = None,
+        f32_class: TypeBase | None = None,
+        f64_class: TypeBase | None = None,
+        # Prefetched enum base class
+        enum_class: TypeBase | None = None,
+        set_class: TypeBase | None = None;
+}
+
+"""Represents a single entry in the symbol resolution stack."""
+obj SymbolResolutionStackEntry {
+    has symbol: uni.Symbol,
+        # Initially true, it's set to false if a recursion
+        # is detected.
+        is_result_valid: bool = True,
+        # Some limited forms of recursion are allowed. In these
+        # cases, a partially-constructed type can be registered.
+        partial_type: TypeBase | None = None;
+}
+
+"""Result of matching arguments to parameters."""
+obj MatchArgsToParamsResult {
+    has arg_params: dict[(uni.Expr | uni.KWPair, types.Parameter | None)],
+        overload: types.FunctionType | None = None,
+        argument_errors: bool = False;
+}
+
+"""Represents a narrowing operation from a conditional predicate."""
+obj NarrowingPredicate {
+    has sym_name: str,
+        narrow_type: TypeBase,
+        is_inverted: bool = False;
+}
+
+"""Type evaluator for JacLang."""
+obj TypeEvaluator {
+    def init(program: "JacProgram") -> None;
+    def _load_stub_module(path: str) -> uni.Module;
+    def _get_type_from_module(module: uni.Module, name: str) -> TypeBase;
+    def _prefetch_types;
+    def get_none_type -> TypeBase;
+    def emit_diag(diag: DiagnosticInfo, nd: uni.UniNode, **kwargs: object) -> None;
+    def get_index_of_symbol_resolution(symbol: uni.Symbol) -> int | None;
+    def push_symbol_resolution(symbol: uni.Symbol) -> bool;
+    def pop_symbol_resolution(symbol: uni.Symbol) -> bool;
+    # Pyright equivalent function name = getEffectiveTypeOfSymbol.
+    def get_type_of_symbol(symbol: uni.Symbol) -> TypeBase;
+    # NOTE: This function doesn't exists in pyright, however it exists as a helper function
+    # for the following functions.
+    def _import_module_from_path(path: str) -> uni.Module;
+    def _try_read_jir_cache(resolved_path: str) -> (uni.Module | None);
+    def _resolve_from_path(from_mod: uni.ModulePath) -> Path;
+    def _is_fstring_all_literal(fstring: uni.FString) -> bool;
+    def _try_resolve_forward_ref(expr: uni.String) -> TypeBase | None;
+    def get_type_of_module(node_: uni.ModulePath) -> types.TypeBase;
+    def get_type_of_module_item(node_: uni.ModuleItem) -> types.TypeBase;
+    def _resolve_star_import_symbol(
+        mod: uni.Module, name: str, visited: set[int] | None = None
+    ) -> uni.Symbol | None;
+
+    def _extract_type_params(node_: uni.Archetype) -> list[types.TypeVarType];
+    def _collect_typevars_from_base(
+        base_class: uni.AtomTrailer,
+        outer_names: set[str],
+        seen_names: set[str],
+        type_params: list[types.TypeVarType]
+    ) -> None;
+
+    def get_type_of_class(node_: uni.Archetype) -> types.ClassType;
+    def get_type_of_enum(node_: uni.Enum) -> types.ClassType;
+    def get_type_of_ability(node_: uni.Ability) -> TypeBase;
+    def get_type_of_string(nd: uni.String | uni.MultiString) -> TypeBase;
+    def get_type_of_int(nd: uni.Int) -> TypeBase;
+    def get_type_of_float(nd: uni.Float) -> TypeBase;
+    def get_type_of_expression(
+        node_: uni.Expr, expected_type: TypeBase | None = None
+    ) -> TypeBase;
+    # Check if a type is Any, object, Unknown, or TypeVar.
+    def is_any_type(ty: TypeBase) -> bool;
+    # Check if a type is the TypeVar class itself (the callable used to create TypeVars).
+    def is_typevar_class(ty: TypeBase) -> bool;
+    # Check if a type is the ParamSpec class itself (not a TypeVarType instance).
+    def is_paramspec_class(ty: TypeBase) -> bool;
+    # Check if a type is the TypeVarTuple class itself (not a TypeVarType instance).
+    def is_type_var_tuple_class(ty: TypeBase) -> bool;
+    # Comments from pyright:
+    # // Determines if the source type can be assigned to the dest type.
+    # // If constraint are provided, type variables within the destType are
+    # // matched against existing type variables in the map. If a type variable
+    # // in the dest type is not in the type map already, it is assigned a type
+    # // and added to the map.
+    #
+    # dest_type = src_type;
+    def assign_type(src_type: TypeBase, dest_type: TypeBase) -> bool;
+    # TODO: This should take an argument list as parameter.
+    def get_type_of_magic_method_call(
+        obj_type: TypeBase,
+        method_name: str,
+        arg_nodes: list[uni.Expr],
+        node_for_error: uni.Expr | None = None
+    ) -> TypeBase | None;
+
+    def is_sub_class(super_cls: types.ClassType, sub_cls: types.ClassType) -> bool;
+    # --- Callable assignment compatibility ---
+    def _assign_callable(
+        src_func: types.FunctionType, dest_func: types.FunctionType
+    ) -> bool;
+
+    def _is_ability_classmethod(node_: uni.Ability) -> bool;
+    def _is_symbol_property(symbol: uni.Symbol) -> bool;
+    # Property type utilities
+    def get_getter_type_from_property(symbol: uni.Symbol) -> (TypeBase | None);
+    def _assign_class(src_type: types.ClassType, dest_type: types.ClassType) -> bool;
+    # This function is a combination of the bellow pyright functions.
+    #  - getDeclaredTypeOfSymbol
+    #  - getTypeForDeclaration
+    #
+    # Implementation Note:
+    # Pyright is actually have some duplicate logic for handling declared
+    # type and inferred type, we're going to unify them (if it's required
+    # in the future, we can refactor this).
+    def _get_type_of_symbol(symbol: uni.Symbol) -> TypeBase;
+    # gets member type and specializes it with class type_args
+    def get_type_of_member(member: Any, class_type: types.ClassType) -> TypeBase;
+    # Pyright: partiallySpecializeType - substitutes TypeVars using class type_args
+    # Now uses type_utils.apply_solved_type_vars
+    def specialize_member_type(
+        member_type: TypeBase, class_type: types.ClassType
+    ) -> TypeBase;
+    # Pyright equivalent function name = getTypeOfExpressionCore();
+    def _get_type_of_expression_core(
+        expr: uni.Expr, expected_type: TypeBase | None = None
+    ) -> TypeBase;
+    # -----------------------------------------------------------------------------
+    # Helper functions
+    # -----------------------------------------------------------------------------
+    def _set_module_item_symbol_and_type(
+        node_: uni.ModuleItem, sym: uni.Symbol
+    ) -> TypeBase;
+
+    def resolve_imported_symbols(sym: uni.Symbol) -> uni.Symbol;
+    def _set_symbol_to_expr(expr: uni.Expr, sym: uni.Symbol) -> TypeBase;
+    def _is_expr_self(expr: uni.Expr) -> bool;
+    def _is_expr_super(expr: uni.Expr) -> bool;
+    def _get_enclosing_function(nd: uni.UniNode) -> uni.Ability | None;
+    def _get_enclosing_return_scope(
+        nd: uni.UniNode
+    ) -> uni.Ability | uni.LambdaExpr | None;
+
+    def _get_declared_return_type(
+        scope: uni.Ability | uni.LambdaExpr
+    ) -> TypeBase | None;
+
+    def _get_enclosing_method(nd: uni.UniNode) -> uni.Ability | None;
+    def _get_enclosing_class(nd: uni.UniNode) -> uni.Archetype | None;
+    def _get_type_of_self(node_: uni.SpecialVarRef) -> TypeBase;
+    def _get_type_of_super(node_: uni.SpecialVarRef) -> TypeBase;
+    def _convert_to_instance(jtype: TypeBase) -> TypeBase;
+    def _type_in_list(ty: TypeBase, type_list: list[TypeBase]) -> bool;
+    def _collect_unique_types(ty: TypeBase, result: list[TypeBase]) -> None;
+    # --- Expected type helpers for bidirectional inference ---
+    def _get_expected_element_type(
+        expected_type: TypeBase | None, container_class: TypeBase
+    ) -> TypeBase | None;
+
+    def _get_expected_kv_types(
+        expected_type: TypeBase | None, dict_class: TypeBase
+    ) -> tuple[TypeBase, TypeBase] | None;
+    # --- Special form handling (Callable, Union, etc.) ---
+    # Returns the prefetched special form type if the name AND type match.
+    # Verifies both name and that type is _SpecialForm to avoid conflicts
+    # with user-defined classes named "Callable".
+    def _get_special_form_type(
+        name: str, symbol_type: types.TypeBase
+    ) -> types.ClassType | None;
+    # creates Self TypeVar if symbol is typing.Self
+    def create_self_type(symbol_type: types.TypeBase) -> types.TypeVarType | None;
+    # --- Callable type handling (similar to Pyright's createCallableType) ---
+    def _create_callable_type(
+        type_args_expr: uni.Expr | None, error_node: uni.Expr
+    ) -> types.FunctionType;
+
+    def _lookup_class_member(
+        base_type: types.ClassType, member: str
+    ) -> type_utils.ClassMember | None;
+
+    def _lookup_object_member(
+        base_type: types.ClassType, member: str
+    ) -> type_utils.ClassMember | None;
+
+    # Get bound member from a class type, handling type[T] subscripts.
+    def get_type_of_bound_member(
+        object_type: types.ClassType, member_name: str
+    ) -> type_utils.ClassMember | None;
+
+    # Check if ClassType is type[T] (builtin type with type args).
+    def _is_type_subscript(class_type: types.ClassType) -> bool;
+    # Get lookup type for member access (extracts T from type[T]).
+    def _get_type_for_member_lookup(object_type: types.ClassType) -> types.ClassType;
+    def _get_getattr_return_type(base_type: types.ClassType) -> TypeBase | None;
+    def match_args_to_params(
+        arg_nodes: list[uni.Expr | uni.KWPair],
+        node_for_error: uni.Expr | None,
+        func_type: types.FunctionType,
+        checking_overload: bool = False,
+        is_unbound_call: bool = False
+    ) -> MatchArgsToParamsResult;
+
+    def _is_unbound_method_call(expr: uni.FuncCall) -> bool;
+    def validate_call_args(expr: uni.FuncCall) -> TypeBase;
+    def validate_arg_types(
+        args: MatchArgsToParamsResult, checking_overload: bool = False
+    ) -> None;
+
+    def _build_field_params(
+        class_type: types.ClassType, skip_deferred: bool = True
+    ) -> dict[str, types.Parameter];
+
+    def _create_dataclass_init_method(
+        class_type: types.ClassType
+    ) -> types.FunctionType;
+
+    def _create_namedtuple_new_method(
+        class_type: types.ClassType
+    ) -> types.FunctionType;
+
+    def _create_special_builtin_type(
+        name: str, base_class: types.ClassType
+    ) -> types.ClassType;
+
+    def _validate_constructor_method(
+        expr: uni.FuncCall, method_type: TypeBase
+    ) -> types.FunctionType | None;
+
+    def _get_method_with_overloads(
+        method_member: Any, caller_type: types.ClassType
+    ) -> TypeBase;
+
+    # -------------------------------------------------------------------------
+    # Generic type inference
+    # -------------------------------------------------------------------------
+    def assign_type_to_type_var(
+        param_type: TypeBase, arg_type: TypeBase, bindings: dict[str, TypeBase]
+    ) -> bool;
+
+    def infer_type_args(
+        caller_type: types.ClassType, expr: uni.FuncCall
+    ) -> list[TypeBase];
+
+    def _infer_type_args_from_method(
+        caller_type: types.ClassType,
+        expr: uni.FuncCall,
+        matched_method: types.FunctionType | None
+    ) -> list[TypeBase];
+
+    def _find_matching_raw_constructor(
+        caller_type: types.ClassType,
+        expr: uni.FuncCall,
+        matched_method: types.FunctionType | None
+    ) -> types.FunctionType | None;
+
+    def _find_overload_by_arg_count(
+        method_type: types.TypeBase, arg_count: int, overload_symbols: list
+    ) -> types.FunctionType | None;
+
+    def _substitute_type_vars(
+        typ: types.TypeBase, bindings: dict[str, types.TypeBase]
+    ) -> types.TypeBase;
+
+    def _get_constructor_for_inference(
+        caller_type: types.ClassType
+    ) -> types.FunctionType | None;
+
+    def _has_meaningful_params(method: types.FunctionType) -> bool;
+    def _collect_type_var_bindings(
+        method: types.FunctionType, expr: uni.FuncCall
+    ) -> dict[str, TypeBase];
+
+    # -------------------------------------------------------------------------
+    # TypeVar scope validation (Pyright: validateTypeVarUsage)
+    # -------------------------------------------------------------------------
+    def validate_typevar_in_type_expr(expr: uni.Expr) -> None;
+    def validate_typevar_scope(expr: uni.Expr, type_var: types.TypeVarType) -> None;
+    def validate_typevar_variance(func: uni.Ability) -> None;
+    def validate_typevar_operation(
+        expr: uni.Expr, operand_type: types.TypeBase, operation: str
+    ) -> None;
+
+    def _get_enclosing_class_type_params(node_: uni.UniNode) -> list[types.TypeVarType];
+    def _get_function_type_params(func: uni.Ability) -> list[types.TypeVarType];
+    def _get_outer_scope_type_params(node_: uni.UniNode) -> list[types.TypeVarType];
+    # -------------------------------------------------------------------------
+    # Type narrowing support
+    #
+    # Two narrowing systems work together:
+    # 1. Scope-based narrowing: Tracks narrowings within if/AND blocks using a
+    #    stack of scope dictionaries. Used during forward AST traversal.
+    # 2. CFG-based narrowing: Walks backward through the control flow graph to
+    #    find narrowing conditions. Used for flow-sensitive analysis.
+    # -------------------------------------------------------------------------
+
+    # --- Scope-based narrowing (forward traversal) ---
+    def push_narrowing_scope -> None;
+    def pop_narrowing_scope -> None;
+    def add_scope_narrowing(key: str, narrowed_type: types.TypeBase) -> None;
+    def get_scope_narrowing(key: str) -> types.TypeBase | None;
+    def get_narrowing_key(expr: uni.Expr) -> str | None;
+    def _find_symbol_by_key(key: str, condition: uni.Expr) -> uni.Symbol | None;
+    def process_condition(condition: uni.Expr) -> None;
+    def process_negated_condition(condition: uni.Expr) -> None;
+    # --- CFG-based narrowing (backward traversal) ---
+    def get_narrowed_type(symbol: uni.Symbol, at_node: uni.UniNode) -> TypeBase | None;
+    def _compute_narrowed_at(
+        symbol: uni.Symbol, stmt: uni.UniCFGNode, visited: set
+    ) -> TypeBase | None;
+
+    def _classify_edge(pred: uni.IfStmt, succ: uni.UniCFGNode) -> str;
+    # --- Shared narrowing utilities ---
+    def _find_predicate_for(
+        symbol: uni.Symbol, condition: uni.Expr
+    ) -> NarrowingPredicate | None;
+
+    def _apply_narrowing(
+        predicate: NarrowingPredicate,
+        incoming: TypeBase | None,
+        is_true_branch: bool,
+        symbol: uni.Symbol
+    ) -> TypeBase | None;
+
+    def _refine_isinstance_type(
+        narrowing_key: str, isinstance_type: TypeBase, condition: uni.Expr
+    ) -> TypeBase;
+
+    def _filter_union_for_isinstance(
+        base_type: TypeBase, target_type: TypeBase
+    ) -> TypeBase | None;
+
+    def _type_matches_isinstance(t: TypeBase, target_type: TypeBase) -> bool;
+    def _union_narrowed_types(types_list: list) -> TypeBase;
+    def exclude_type_from_union(original: TypeBase, to_exclude: TypeBase) -> TypeBase;
+    def _get_type_from_match_pattern(pattern: uni.MatchPattern) -> TypeBase | None;
+    def _union_contains_none(union_type: TypeBase) -> bool;
+    def _extract_isinstance_info(condition: uni.Expr) -> tuple[str, TypeBase] | None;
+}

@@ -1,0 +1,781 @@
+impl Task.postinit -> None {
+    self.task_id = Task._task_id;
+    self.cancel_token = threading.Event();
+    Task._task_id += 1;
+}
+
+"""Initialize JacLangServer."""
+impl JacLangServer.postinit -> None {
+    # Set LanguageServer fields directly to avoid recursion
+    # (LanguageServer.init triggers postinit → JacLangServer.postinit → infinite loop)
+    self.name = 'jac-lsp';
+    self.version = 'v0.1';
+    self._write_lock = threading.Lock();
+    JacProgram.init(self);
+    self._state_lock = ReadWriteLock();
+    self.module_manager = ModuleManager(self, self.sem_managers);
+    # Initialize idle event as set (server starts idle)
+    self._idle_event = threading.Event();
+    self._idle_event.set();
+    # Worker for type checking using flow.
+    self.worker_future = flow self.dispatcher() ;
+    logging.getLogger().setLevel(logging.CRITICAL);
+}
+
+"""Debounced type check - waits for typing to pause before starting analysis."""
+impl JacLangServer.type_check(file_uri: str) -> None {
+    DEBOUNCE_DELAY = 0.3;  # 300ms debounce delay
+    with self._state_lock.write_lock() {
+        # Cancel any pending debounce timer
+        if self._debounce_timer {
+            self._debounce_timer.cancel();
+            self._debounce_timer = None;
+        }
+        # Cancel any running task
+        if self.last_task and not self.last_task.cancel_token.is_set() {
+            self.last_task.cancel_token.set();
+            if file_uri != self.last_task.file_uri {
+                self.dirty_files[self.last_task.file_uri] = True;
+            }
+            self.debug(
+                " Cancelling id: " + str(self.last_task.task_id) + " " + str(
+                    time.time()
+                )
+            );
+        }
+        # Store for _flush_debounce and start timer with file_uri as argument
+        self._debounce_timer = threading.Timer(
+            DEBOUNCE_DELAY, self._do_type_check, args=[file_uri]
+        );
+        self._debounce_timer.start();
+    }
+}
+
+"""Actually queue the type check task after debounce delay."""
+impl JacLangServer._do_type_check(file_uri: str) -> None {
+    with self._state_lock.write_lock() {
+        # Clear timer reference and pending file
+        self._debounce_timer = None;
+        # Clear idle event since we're about to add work
+        self._idle_event.clear();
+        self.debug("Debounce triggered, starting type check for " + file_uri);
+        self.last_task = Task(file_uri);
+        self.pipe.append(self.last_task);
+        # Trigger the worker to pick up the new task.
+        self._work_event.set();
+    }
+}
+
+"""Rebuild a file and its dependencies (typecheck)."""
+impl JacLangServer.type_check_file(
+    file_uri: str, cancel_token: threading.Event | None = None
+) -> bool {
+    if cancel_token and cancel_token.is_set() {
+        return False;
+    }
+    try {
+        document = self.workspace.get_text_document(file_uri);
+        fs_path = document.path;
+
+        # Determine the main file to compile
+        base = discover_base_file(fs_path);
+        main_path = base or fs_path;
+
+        # Collect all files involved (main + annexes) for diagnostics
+        files_to_check = [main_path];
+        files_to_check.extend(discover_annex_files(main_path, '.impl.jac'));
+        files_to_check.extend(discover_annex_files(main_path, '.test.jac'));
+
+        # Clear alerts for all involved files
+        for f in files_to_check {
+            self._clear_alerts_for_file(f);
+        }
+
+        # Compile the main file
+        import from jaclang.jac0core.compile_options { CompileOptions }
+        main_doc = self.workspace.get_text_document(uris.from_fs_path(main_path));
+        build = self.compile(
+            file_path=main_path,
+            use_str=main_doc.source,
+            options=CompileOptions(
+                type_check=True,
+                no_cgen=True,
+                force_target_program=True,
+                cancel_token=cancel_token
+            )
+        );
+
+        if cancel_token and cancel_token.is_set() {
+            return False;
+        }
+        self.update_modules(main_path, build);
+
+        # Publish diagnostics to all involved files
+        all_errors = list(self.errors_had);
+        all_warnings = list(self.warnings_had);
+        for f in files_to_check {
+            self.publish_diagnostics(
+                uris.from_fs_path(f),
+                utils.gen_diagnostics(f, all_errors, all_warnings)
+            );
+        }
+    } except Exception as e {
+        self.log_error(f"Error during type check: {e}");
+        return False;
+    }
+    return True;
+}
+
+impl JacLangServer.dispatcher -> None {
+    while True {
+        start_time = time.time();
+        self.debug("Dispatcher waiting for work...");
+        # Wait until there's a task to process or shutdown is called.
+        self._work_event.wait();
+        # Determine next task under write lock (pops from pipe/dirty_files).
+        task: Task | None = None;
+        should_exit = False;
+        with self._state_lock.write_lock() {
+            if self._shutdown_called {
+                should_exit = True;
+            } elif self.pipe {
+                task = self.pipe.popleft();
+            } elif self.dirty_files {
+                # Get the most recent dirty file and create a NEW task for it
+                (file_uri, _) = self.dirty_files.popitem();
+                task = Task(file_uri);
+            } else {
+                # No tasks to process, signal idle and wait for the next one.
+                self._work_event.clear();
+                self._idle_event.set();
+            }
+        }
+        if should_exit {
+            self.debug("Shutting down dispatcher");
+            break;
+        }
+        if not task {
+            continue;
+        }
+        # Lock released — type_check_file runs without holding the RWLock,
+        # allowing readers (hover, completion, etc.) to proceed concurrently.
+        self.debug("Dispatching task id: " + str(task.task_id));
+        try {
+            self.type_check_file(task.file_uri, cancel_token=task.cancel_token);
+            self.lsp.send_request(lspt.WORKSPACE_SEMANTIC_TOKENS_REFRESH);
+        } finally { }
+        if task.cancel_token.is_set() {
+            self.debug(
+                "Task cancelled id: " + str(task.task_id) + " " + str(time.time())
+            );
+        } else {
+            # Mark task as done so type_check won't try to "cancel" it later
+            task.cancel_token.set();
+            elapsed = time.time() - start_time;
+            self.debug(
+                f"Task completed id: {str(task.task_id)}, took: {elapsed:.4f}s {str(
+                    task.file_uri
+                )}"
+            );
+        }
+        # Check if there's more work, otherwise signal idle
+        with self._state_lock.read_lock() {
+            has_more = bool(self.pipe) or bool(self.dirty_files);
+        }
+        if not has_more {
+            self._idle_event.set();
+        }
+    }
+}
+
+impl JacLangServer.shutdown -> None {
+    # Guard against double shutdown under write lock.
+    with self._state_lock.write_lock() {
+        if self._shutdown_called {
+            return;
+        }
+        self._shutdown_called = True;
+        # Cancel any pending debounce timer
+        if self._debounce_timer {
+            self._debounce_timer.cancel();
+            self._debounce_timer = None;
+        }
+    }
+    # Release lock before waiting on worker to avoid deadlock.
+    try {
+        if self?.worker_future and not self?.worker_future.done() {
+            self._work_event.set();  # Wake up the worker to let it exit gracefully.
+            wait self.worker_future ;  # Wait for the worker to finish
+        }
+    } finally {
+        super.shutdown();
+    }
+}
+
+"""Log a message."""
+impl JacLangServer.log_py(message: str) -> None {
+    logging.info(message);
+}
+
+"""Log an info message."""
+impl JacLangServer.log_info(message: str) -> None {
+    self.show_message_log(message, lspt.MessageType.Info);
+    self.show_message(message, lspt.MessageType.Info);
+}
+
+"""Log a warning message."""
+impl JacLangServer.log_warning(message: str) -> None {
+    self.show_message_log(message, lspt.MessageType.Warning);
+    self.show_message(message, lspt.MessageType.Warning);
+}
+
+"""Log an error message."""
+impl JacLangServer.log_error(message: str) -> None {
+    self.show_message_log(message, lspt.MessageType.Error);
+    self.show_message(message, lspt.MessageType.Error);
+}
+
+"""Return semantic tokens for a file."""
+impl JacLangServer.get_semantic_tokens(file_path: str) -> lspt.SemanticTokens {
+    fs_path = uris.to_fs_path(file_path);
+    with self._state_lock.read_lock() {
+        sem_mgr = self.sem_managers.get(fs_path);
+        if not sem_mgr {
+            return lspt.SemanticTokens(data=[]);
+        }
+        return lspt.SemanticTokens(data=list(sem_mgr.sem_tokens));
+    }
+}
+
+"""Rename a symbol in a file."""
+impl JacLangServer.rename_symbol(
+    file_path: str, position: lspt.Position, new_name: str
+) -> Optional[lspt.WorkspaceEdit] {
+    node_selected = self.get_token_at_position(file_path, position);
+    if node_selected and node_selected.sym {
+        changes: dict[(str, list[lspt.TextEdit])] = {};
+        for nd in [*node_selected.sym.uses, node_selected.sym.defn[0]] {
+            key = uris.from_fs_path(nd.loc.mod_path);
+            new_edit = lspt.TextEdit(
+                range=utils.create_range(nd.loc), new_text=new_name
+            );
+            utils.add_unique_text_edit(changes, key, new_edit);
+        }
+        return lspt.WorkspaceEdit(changes=changes);
+    }
+    return None;
+}
+
+"""Return references for a file."""
+impl JacLangServer.get_references(
+    file_path: str, position: lspt.Position
+) -> list[lspt.Location] {
+    node_selected = self.get_token_at_position(file_path, position);
+    if node_selected and node_selected.sym {
+        list_of_references: list[lspt.Location] = [
+            lspt.Location(
+                uri=uris.from_fs_path(cur_node.loc.mod_path),
+                range=utils.create_range(cur_node.loc)
+            ) for cur_node in [*node_selected.sym.defn, *node_selected.sym.uses]
+        ];
+        return list_of_references;
+    }
+    return [];
+}
+
+"""Return definition location for a file."""
+impl JacLangServer.get_definition(
+    file_path: str, position: lspt.Position
+) -> Optional[lspt.Location] {
+    import from pathlib { Path }
+
+    def make_location(node_: uni.UniNode, is_module: bool = False) -> lspt.Location {
+        mod_path = node_.type.file_uri if is_module else node_.loc.mod_path;
+        decl_range = (
+            utils.create_range(node_.loc)
+                if not is_module
+                else lspt.Range(
+                    start=lspt.Position(line=0, character=0),
+                    end=lspt.Position(line=0, character=0)
+                )
+        );
+        return lspt.Location(uri=uris.from_fs_path(str(mod_path)), range=decl_range);
+    }
+    def make_module_location(file_path_str: str) -> lspt.Location {
+        return lspt.Location(
+            uri=uris.from_fs_path(file_path_str),
+            range=lspt.Range(
+                start=lspt.Position(line=0, character=0),
+                end=lspt.Position(line=0, character=0)
+            )
+        );
+    }
+    node_selected = self.get_token_at_position(file_path, position);
+    if not node_selected {
+        return None;
+    }
+    node_type = node_selected.type;
+    parent = node_selected.parent;
+    ####################################################################
+    ##         Check for impl body first (stub -> impl navigation)    ##
+    ####################################################################
+    if isinstance(parent, uni.AstImplNeedingNode) and parent.body {
+        if isinstance(parent.body, uni.ImplDef) {
+            return make_location(parent.body.sym.decl);
+        }
+    }
+    ####################################################################
+    ##         Import-aware goto-def (module paths & imported items)  ##
+    ####################################################################
+    # When the cursor is on a module path segment or an imported item,
+    # use direct module resolution as the primary strategy. This is
+    # resilient to partial type evaluation failures.
+    if isinstance(parent, uni.ModulePath) {
+        # Cursor is on a segment of a module path (e.g., "cli" in "jaclang.cli.console")
+        # First try type-based resolution (fast, already computed)
+        if node_type and isinstance(node_type, ModuleType) {
+            return make_location(node_selected, is_module=True);
+        }
+        # Fallback: resolve the module path segment directly via the resolver.
+        import_node = parent.parent_of_type(uni.Import) if parent else None;
+        if import_node and parent.path {
+            try {
+                idx = `list(parent.path).index(node_selected);
+                path_list = parent.resolve_relative_path_list();
+                if idx < len(path_list) {
+                    resolved = path_list[idx];
+                    if Path(resolved).exists() {
+                        return make_module_location(resolved);
+                    }
+                }
+            } except (ValueError, Exception) as e {
+                self.log_py(f"Error resolving module path segment: {e}");
+            }
+        }
+    }
+    if isinstance(parent, uni.ModuleItem) and isinstance(node_selected, uni.Name) {
+        # Cursor is on an imported item name (e.g., "console" in "{ console }")
+        # If the item is a module (e.g., "uris" in "from jaclang.lsp { uris }"),
+        # defer to the type-based handler below which handles ModuleType correctly.
+        if node_type and isinstance(node_type, ModuleType) {
+            return make_location(node_selected, is_module=True);
+        }
+        # Check if sym was already linked to the remote definition by type checker
+        if (
+            node_selected.sym
+            and node_selected.sym.defn
+            and node_selected.sym.defn[0].loc.mod_path != node_selected.loc.mod_path
+        ) {
+            decl = node_selected.sym.defn[0];
+            return make_location(decl);
+        }
+        # Fallback: resolve the target module and look up the symbol directly.
+        import_node = parent.parent_of_type(uni.Import) if parent else None;
+        if import_node and import_node.from_loc {
+            try {
+                mod_path = import_node.from_loc.resolve_relative_path();
+                if Path(mod_path).exists() and not Path(mod_path).is_dir() {
+                    # Try to find the symbol in the target module's hub entry
+                    resolved_path = str(Path(mod_path).resolve());
+                    with self._state_lock.read_lock() {
+                        target_mod = self.mod.hub.get(resolved_path);
+                    }
+                    if target_mod {
+                        sym = target_mod.lookup(
+                            node_selected.value, deep=True, incl_inner_scope=True
+                        );
+                        if sym and sym.defn {
+                            return make_location(sym.defn[0]);
+                        }
+                    }
+                    # If symbol not found in hub, at least navigate to the module
+                    return make_module_location(mod_path);
+                }
+            } except Exception as e {
+                self.log_py(f"Error resolving imported item: {e}");
+            }
+        }
+    }
+    ####################################################################
+    ##          Handle go to def for types and variables              ##
+    ####################################################################
+    if node_type {
+        if isinstance(node_type, ModuleType) {
+            return make_location(node_selected, is_module=True);
+        } elif isinstance(node_type, ClassType) and node_selected.sym {
+            return make_location(node_selected.sym.decl);
+        } elif isinstance(node_type, (FunctionType, OverloadedType))
+        and node_selected.sym {
+            return make_location(node_selected.sym.decl);
+        }
+    }
+    ####################################################################
+    ##         Ad-hoc handling for impl-def go to def                 ##
+    ####################################################################
+    if not parent {
+        return None;
+    }
+    if isinstance(parent, uni.ImplDef) and parent.decl_link {
+        return make_location(parent.decl_link.sym.decl);
+    }
+    ####################################################################
+    ##         Fallback: use symbol resolution if available           ##
+    ####################################################################
+    # Even if type is not available, we can still navigate using the symbol
+    # reference. This is important for symbols resolved in impl bodies where
+    # type inference may not have run yet.
+    if node_selected.sym and node_selected.sym.defn {
+        try {
+            return make_location(node_selected.sym.defn[0]);
+        } except Exception as e {
+            self.log_py(f"Error navigating to definition: {e}");
+        }
+    }
+    return None;
+}
+
+"""Return document symbols for a file."""
+impl JacLangServer.get_outline(file_path: str) -> list[lspt.DocumentSymbol] {
+    fs_path = uris.to_fs_path(file_path);
+    with self._state_lock.read_lock() {
+        if fs_path in self.mod.hub and (root_node := self.mod.hub[fs_path].sym_tab) {
+            return utils.get_symbols_for_outline(root_node);
+        }
+    }
+    return [];
+}
+
+"""Extract meaningful information from the AST node."""
+impl JacLangServer.get_node_info(sym_node: uni.AstSymbolNode) -> Optional[str] {
+    node_info: Optional[str] = None;
+    try {
+        # Handle NameAtom: convert to name_of for symbol info.
+        if isinstance(sym_node, uni.NameAtom) {
+            # Dynamic attribute from __getattr__: show type directly
+            if sym_node.is_getattr_resolved {
+                return f"(dynamic attribute) {sym_node.value}: {sym_node.type}";
+            }
+            sym_node = sym_node.name_of;
+        }
+        access = (sym_node.sym.access.value + ' ') if sym_node.sym else None;
+        node_info = f"'('{(access or '')}{sym_node.sym_category.value}') '{sym_node.sym_name}";
+        # Prefer narrowed/evaluated type (.type) over declared type (name_spec.type)
+        # This shows the correct type after narrowing (e.g., Mammal instead of Mammal|None)
+        # Skip type display for Ability nodes — their signature is shown separately below
+        if not isinstance(sym_node, uni.Ability) {
+            if sym_node?.type and sym_node.type {
+                node_info += f"': '{sym_node.type}";
+            } elif sym_node.name_spec.clean_type {
+                node_info += f"': '{sym_node.name_spec.clean_type}";
+            } elif (
+                isinstance(sym_node, uni.AstSymbolNode)
+                and isinstance(sym_node.name_spec.type, ClassType)
+            ) {
+                node_info += f"': '{sym_node.name_spec.type.shared.class_name}";
+            }
+        }
+        if isinstance(sym_node, uni.AstDocNode) and sym_node.doc {
+            node_info += f"'\n'{sym_node.doc.value}";
+        }
+        if isinstance(sym_node, uni.Ability) and sym_node.signature {
+            node_info += f"'\n'{sym_node.signature.unparse()}";
+        }
+    } except AttributeError as e {
+        self.log_warning(f"'Attribute error when accessing node attributes: '{e}");
+    }
+    return node_info.strip() if node_info else None;
+}
+
+"""Return hover information for a file."""
+impl JacLangServer.get_hover_info(
+    file_path: str, position: lspt.Position
+) -> Optional[lspt.Hover] {
+    node_selected = self.get_token_at_position(file_path, position);
+    value = self.get_node_info(node_selected) if node_selected else None;
+    if value {
+        return lspt.Hover(
+            contents=lspt.MarkupContent(
+                kind=lspt.MarkupKind.PlainText, value=f"{value}"
+            )
+        );
+    }
+    return None;
+}
+
+"""Format a document, optionally with lint auto-fix applied."""
+impl JacLangServer.format_document(
+    file_path: str, auto_lint: bool = False
+) -> list[lspt.TextEdit] {
+    document = self.workspace.get_text_document(file_path);
+    try {
+        prog = JacProgram.jac_str_formatter(
+            source_str=document.source, file_path=document.path, auto_lint=auto_lint
+        );
+        formatted_text = prog.mod.main.gen.jac
+            if not prog.errors_had
+            else document.source;
+    } except Exception as e {
+        self.log_error(f"Error during {'lintfix ' if auto_lint else ''}formatting: {e}");
+        formatted_text = document.source;
+    }
+    return [
+        lspt.TextEdit(
+            range=lspt.Range(
+                start=lspt.Position(line=0, character=0),
+                end=lspt.Position(
+                    line=(len(document.source.splitlines()) + 1), character=0
+                )
+            ),
+            new_text=formatted_text
+        )
+    ];
+}
+
+"""Close module (didClose cleanup - remove sem_manager only)."""
+impl JacLangServer.close_module(uri: str) -> None {
+    fs_path = uris.to_fs_path(uri);
+    with self._state_lock.write_lock() {
+        if fs_path in self.sem_managers {
+            del (self.sem_managers[fs_path], );
+        }
+    }
+}
+
+"""Delete module."""
+impl JacLangServer.delete_module(uri: str) -> None {
+    with self._state_lock.write_lock() {
+        if uri in self.mod.hub {
+            del (self.mod.hub[uri], );
+        }
+        if uri in self.sem_managers {
+            del (self.sem_managers[uri], );
+        }
+    }
+}
+
+"""Rename module."""
+impl JacLangServer.rename_module(old_path: str, new_path: str) -> None {
+    with self._state_lock.write_lock() {
+        if old_path in self.mod.hub and new_path != old_path {
+            self.mod.hub[new_path] = self.mod.hub[old_path];
+            self.sem_managers[new_path] = self.sem_managers[old_path];
+            del (self.mod.hub[old_path], );
+            del (self.sem_managers[old_path], );
+        }
+    }
+}
+
+"""Get type members for completion."""
+impl JacLangServer.get_completion_items_of(
+    ty: TypeBase | uni.UniScopeNode
+) -> lspt.CompletionList {
+    items: list[lspt.CompletionItem] = [];
+    for item in get_completion_items(ty) {
+        detail: lspt.CompletionItemLabelDetails | None = None;
+        if item.detail {
+            detail = lspt.CompletionItemLabelDetails(detail=item.detail);
+        }
+        items.append(
+            lspt.CompletionItem(
+                label=item.label, kind=item.kind, label_details=detail,
+            )
+        );
+    }
+    return lspt.CompletionList(is_incomplete=False, items=items,);
+}
+
+"""Return the type of an AST node if it has one."""
+impl JacLangServer.get_node_type(n: uni.UniNode) -> Optional[TypeBase] {
+    if isinstance(n, uni.Expr) {
+        typ = self.get_type_evaluator().get_type_of_expression(n);
+        self.debug("found type " + str(typ) + " for expr " + str(n));
+        return typ;
+    }
+    self.debug("no type found for node " + str(n));
+    return None;
+}
+
+impl JacLangServer.get_completion_of_node(nd: uni.UniNode) -> lspt.CompletionList {
+    if (node_type := self.get_node_type(nd)) {
+        self.debug("found type " + str(node_type));
+        return self.get_completion_items_of(node_type);
+    } elif isinstance(nd, UniScopeNode) {
+        self.debug("found scope node " + str(nd));
+        return self.get_completion_items_of(nd);
+    }
+    self.debug("no type found for node " + str(nd));
+    return lspt.CompletionList(is_incomplete=False, items=[]);
+}
+
+impl JacLangServer.get_node_at_position(
+    file_path: str, line: int, col: int
+) -> Optional[uni.UniNode] {
+    if (ast := self.get_ast_of_file(file_path)) {
+        for ast_node in ast._in_mod_nodes {
+            if not isinstance(ast_node, uni.Token) {
+                continue;
+            }
+            if (utils.position_within_node(ast_node, line + 1, col + 1)) {
+                return ast_node;
+            }
+        }
+    }
+    return None;
+}
+
+impl JacLangServer.get_ast_of_file(file_path: str) -> Optional[uni.UniNode] {
+    with self._state_lock.read_lock() {
+        if file_path in self.mod.hub {
+            return self.mod.hub[file_path];
+        }
+    }
+    return None;
+}
+
+"""Synchronous version of wait_till_idle for testing."""
+impl JacLangServer.wait_till_idle_sync(file_uri: str) -> None {
+    self.debug("Waiting for server to be idle (sync)...");
+    # First, flush any pending debounce timer
+    with self._state_lock.write_lock() {
+        if self._debounce_timer {
+            self._debounce_timer.cancel();
+            self._debounce_timer = None;
+        }
+    }
+    self._do_type_check(file_uri);
+    # Wait for dispatcher to become idle and re-check queue state after wake to avoid races with stale work events.
+    while True {
+        self._idle_event.wait();
+        with self._state_lock.read_lock() {
+            has_pending_work = bool(
+                self.pipe or self.dirty_files or self._debounce_timer
+            );
+        }
+        if not has_pending_work {
+            break;
+        }
+        self._idle_event.clear();
+        self._work_event.set();
+    }
+    self.debug("Server is now idle");
+}
+
+"""Return completion for a file."""
+impl JacLangServer.get_completion(
+    file_uri: str, position: lspt.Position, completion_trigger: Optional[str]
+) -> lspt.CompletionList {
+    self.debug("Getting completion for " + file_uri + " at " + str(position));
+    try {
+        file_path = uris.to_fs_path(file_uri);
+        if (
+            node_at_pos := self.get_node_at_position(
+                file_path, position.line, position.character - 1
+            )
+        ) {
+            self.debug(
+                "found the node at pos " + str(position) + " " + str(node_at_pos)
+            );
+            # For each trigger character we need to handle the completion differently
+            if isinstance(node_at_pos, uni.Token) {
+                if node_at_pos.name == "DOT" {
+                    member_access = node_at_pos.parent;
+                    self.debug("found dot " + str(member_access));
+                    if isinstance(member_access, uni.AtomTrailer) {
+                        self.debug("before returning the list");
+                        return self.get_completion_of_node(member_access.target);
+                    }
+                    # FIXME: This is wrong but imma do it anyways like this for now.
+                } elif node_at_pos.name == "NAME" {
+                    # Name of atom trailer.
+                    if (
+                        node_at_pos.parent
+                        and isinstance(node_at_pos.parent, uni.AtomTrailer)
+                    ) {
+                        self.debug(
+                            "found name in atom trailer " + str(node_at_pos.parent)
+                        );
+                        return self.get_completion_of_node(node_at_pos.parent.target);
+                    }
+                    # Just a name field.
+                    if scope_node := node_at_pos.find_parent_of_type(
+                        uni.UniScopeNode
+                    ) {
+                        self.debug("found name in scope node " + str(scope_node));
+                        return self.get_completion_of_node(scope_node);
+                    }
+                }
+            }
+        }
+        return lspt.CompletionList(is_incomplete=False, items=[]);
+    } except Exception as e {
+        self.log_py(f"'Error during completion: '{e}");
+        return lspt.CompletionList(is_incomplete=False, items=[]);
+    }
+}
+
+impl JacLangServer.debug(msg: str) -> None {
+    console.error(f"[Engine] {msg}");
+}
+
+impl JacLangServer.get_token_at_position(
+    file_path: str, position: lspt.Position
+) -> Optional[uni.UniNode] {
+    fs_path = uris.to_fs_path(file_path);
+    with self._state_lock.read_lock() {
+        if fs_path not in self.mod.hub {
+            return None;
+        }
+        sem_mgr = self.sem_managers.get(fs_path);
+        if not sem_mgr {
+            return None;
+        }
+        token_index = utils.find_index(
+            sem_mgr.sem_tokens, position.line, position.character
+        );
+        if token_index is None {
+            return None;
+        }
+        if token_index < len(sem_mgr.static_sem_tokens) {
+            return sem_mgr.static_sem_tokens[token_index][3];
+        }
+        return None;
+    }
+}
+
+"""Update modules in JacProgram's hub and semantic managers."""
+impl JacLangServer.update_modules(
+    file_path: str, build: uni.Module, need: bool = True
+) -> None {
+    self.log_py(f"'Updating modules for '{file_path}");
+    with self._state_lock.write_lock() {
+        self.module_manager.update(file_path, build, update_annexed=need);
+    }
+}
+
+"""Get IR for a file path."""
+impl JacLangServer.get_ir(file_path: str) -> Optional[uni.Module] {
+    with self._state_lock.read_lock() {
+        return self.mod.hub.get(file_path);
+    }
+}
+
+"""Remove errors and warnings for a specific file from the lists."""
+impl JacLangServer._clear_alerts_for_file(file_path: str) -> None {
+    with self._state_lock.write_lock() {
+        self.module_manager.clear_alerts_for_file(file_path);
+    }
+}
+
+"""Return diagnostics for all files as a dict {uri: diagnostics}."""
+impl JacLangServer.diagnostics -> dict[str, list] {
+    with self._state_lock.read_lock() {
+        all_errors = list(self.errors_had);
+        all_warnings = list(self.warnings_had);
+        result = {};
+        for file_path in self.mod.hub {
+            uri = uris.from_fs_path(file_path);
+            result[uri] = utils.gen_diagnostics(file_path, all_errors, all_warnings);
+        }
+        return result;
+    }
+}

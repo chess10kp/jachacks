@@ -1,0 +1,17 @@
+[project]
+name = "styled-components"
+version = "1.0.0"
+description = "Jac client application: styled-components"
+entry-point = "main.jac"
+
+[plugins.client]
+# Vite bundler configuration (optional overrides)
+# vite.plugins = []
+# vite.build = {}
+
+[dependencies.npm]
+"jac-client-node" = "1.0.7"
+styled-components = "^6.1.13"
+
+[dependencies.npm.dev]
+"@jac-client/dev-deps" = "1.0.0"

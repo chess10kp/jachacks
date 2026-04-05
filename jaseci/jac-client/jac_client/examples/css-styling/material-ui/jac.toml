@@ -1,0 +1,20 @@
+[project]
+name = "material-ui"
+version = "1.0.0"
+description = "Jac client application: material-ui"
+entry-point = "main.jac"
+
+[plugins.client]
+# Vite bundler configuration (optional overrides)
+# vite.plugins = []
+# vite.build = {}
+
+[dependencies.npm]
+"jac-client-node" = "1.0.7"
+"@emotion/react" = "^11.14.0"
+"@emotion/styled" = "^11.14.1"
+"@mui/icons-material" = "^7.3.5"
+"@mui/material" = "^7.3.5"
+
+[dependencies.npm.dev]
+"@jac-client/dev-deps" = "1.0.0"

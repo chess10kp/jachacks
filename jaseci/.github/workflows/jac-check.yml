@@ -1,0 +1,45 @@
+name: Jac Type Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  jac-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -e ./jac
+          pip install -e ./jac-scale
+          pip install -e ./jac-client
+          pip install -e ./jac-byllm
+          pip install -e ./jac-super
+
+      - name: Warm up compiler cache
+        run: jac --version
+
+      - name: Run jac format (check formatting)
+        run: |
+          find . -type f -name "*.jac" ! -path "*/tests/*" ! -path "*/fixtures/*" ! -path "./scripts/*" ! -name "*_err.jac" ! -name "*_syntax_err.jac" -print0 | xargs -0 --no-run-if-empty jac format --check --lintfix
+
+      - name: Verify jir_registry.jac is up to date
+        run: |
+          jac gen-jir-registry --verify
+
+      - name: Run jac check (using .jacignore)
+        run: |
+          jac check . --ignore tests checker_*.jac *_err.jac $(grep -v '^#' .jacignore | grep -v '^[[:space:]]*$' | tr '\n' ' ') --nowarn

@@ -1,0 +1,149 @@
+"""
+Memory Hierarchy Implementation for jac-scale.
+
+This module provides scalable storage backends that replace the default
+implementations in jaclang.runtimelib.memory:
+- RedisBackend: Replaces LocalCacheMemory as L2 distributed cache
+- MongoBackend: Replaces SqliteMemory as L3 persistent storage
+
+ScaleTieredMemory extends TieredMemory by swapping in these backends.
+Falls back to jaclang's SqliteMemory when MongoDB is unavailable.
+"""
+import json;
+import logging;
+import redis;
+import from collections.abc { Callable, Generator, Iterable }
+import from pickle { dumps, loads }
+import from typing { Any, cast }
+import from uuid { UUID }
+import from pymongo { MongoClient, UpdateOne }
+import from pymongo.errors { ConnectionFailure }
+import from jaclang.jac0core.archetype { Anchor, NodeAnchor, Root }
+import from jaclang.runtimelib.memory {
+    CacheMemory,
+    PersistentMemory,
+    TieredMemory,
+    SqliteMemory
+}
+import from jaclang.runtimelib.utils { storage_key, to_uuid }
+import from jaclang.runtimelib.serializer { Serializer }
+import from jac_scale.config_loader { get_scale_config }
+import from jaclang { JacRuntimeInterface as Jac }
+
+glob logger = logging.getLogger(__name__);
+
+"""Get fresh database config to support dynamic env var changes (e.g., testcontainers)."""
+def _get_db_config -> dict {
+    return get_scale_config().get_database_config();
+}
+
+"""
+Redis cache backend - implements CacheMemory for distributed L2 caching.
+Replaces LocalCacheMemory when Redis is available.
+"""
+obj RedisBackend(CacheMemory) {
+    has redis_url: (str | None) = None,
+        redis_client: (redis.Redis | None) = None;
+
+    def postinit -> None;
+    def is_available -> bool;
+    # CacheMemory interface (Memory methods + cache-specific)
+    def get(id: UUID) -> (Anchor | None);
+    def put(anchor: Anchor) -> None;
+    def delete(id: UUID) -> None;
+    def close -> None;
+    def `has(id: UUID) -> bool;
+    def query(
+        filter: (Callable[[Anchor], bool] | None) = None
+    ) -> Generator[Anchor, None, None];
+
+    def get_roots -> Generator[Root, None, None];
+    def find(
+        ids: (UUID | Iterable[UUID]),
+        filter: (Callable[[Anchor], Anchor] | None) = None
+    ) -> Generator[Anchor, None, None];
+
+    def find_one(
+        ids: (UUID | Iterable[UUID]),
+        filter: (Callable[[Anchor], Anchor] | None) = None
+    ) -> (Anchor | None);
+
+    def commit(anchor: (Anchor | None) = None) -> None;
+    # CacheMemory-specific
+    def exists(id: UUID) -> bool;
+    def put_if_exists(anchor: Anchor) -> bool;
+    def invalidate(id: UUID) -> None;
+}
+
+"""
+MongoDB persistence backend - implements PersistentMemory for durable L3 storage.
+Replaces SqliteMemory when MongoDB is available.
+"""
+obj MongoBackend(PersistentMemory) {
+    has client: MongoClient | None = None,
+        db: Any by postinit,
+        collection: Any by postinit,
+        db_name: str = 'jac_db',
+        collection_name: str = '_anchors',
+        mongo_url: (str | None) = None,
+        _mem_ref: (dict[UUID, Anchor] | None) = None;
+
+    def postinit -> None;
+    def set_memory_ref(mem: dict[UUID, Anchor]) -> None;
+    def is_available -> bool;
+    # PersistentMemory interface (Memory methods + persistence-specific)
+    def get(id: UUID) -> (Anchor | None);
+    def put(anchor: Anchor) -> None;
+    def delete(id: UUID) -> None;
+    def close -> None;
+    def `has(id: UUID) -> bool;
+    def query(
+        filter: (Callable[[Anchor], bool] | None) = None
+    ) -> Generator[Anchor, None, None];
+
+    def get_roots -> Generator[Root, None, None];
+    def find(
+        ids: (UUID | Iterable[UUID]),
+        filter: (Callable[[Anchor], Anchor] | None) = None
+    ) -> Generator[Anchor, None, None];
+
+    def find_one(
+        ids: (UUID | Iterable[UUID]),
+        filter: (Callable[[Anchor], Anchor] | None) = None
+    ) -> (Anchor | None);
+
+    def commit(anchor: (Anchor | None) = None) -> None;
+    # PersistentMemory-specific
+    def sync -> None;
+    def bulk_put(anchors: Iterable[Anchor]) -> None;
+    # Internal
+    def _load_anchor(raw: dict[(str, Any)]) -> (Anchor | None);
+}
+
+"""
+Persistence backend type for ScaleTieredMemory.
+"""
+enum PersistenceType {
+    NONE,
+    MONGODB,
+    SQLITE
+}
+
+"""
+Scalable Tiered Memory - extends TieredMemory with distributed backends.
+
+Swaps the default implementations:
+- L2: RedisBackend instead of LocalCacheMemory (when Redis available)
+- L3: MongoBackend instead of SqliteMemory (when MongoDB available)
+
+Falls back to jaclang's SqliteMemory for L3 when MongoDB is unavailable.
+Storage configuration comes from environment variables or jac.toml.
+"""
+obj ScaleTieredMemory(TieredMemory) {
+    has _cache_available: bool = False,
+        _persistence_type: PersistenceType = PersistenceType.NONE;
+
+    def init(use_cache: bool = True) -> None;
+    def commit(anchor: (Anchor | None) = None) -> None;
+    def close -> None;
+}

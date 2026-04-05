@@ -1,0 +1,13 @@
+[project]
+name = "basic"
+version = "1.0.0"
+description = "Jac client application: basic"
+entry-point = "main.jac"
+
+[plugins.client]
+
+[dependencies.npm]
+jac-client-node = "1.0.7"
+
+[dependencies.npm.dev]
+"@jac-client/dev-deps" = "2.0.0"
