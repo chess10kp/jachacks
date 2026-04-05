@@ -4,7 +4,23 @@ This document provides curl/HTTP commands that can be invoked from Jac code via 
 
 ## Credentials
 
+```bash
 # InsForge
+export INSFORGE_BASE_URL="https://your-project.region.insforge.app"
+export INSFORGE_ANON_KEY="<your-insforge-anon-key>"
+
+# Backboard
+export BACKBOARD_BASE_URL="https://app.backboard.io/api"
+export BACKBOARD_API_KEY="<your-backboard-api-key>"
+export BACKBOARD_ASSISTANT_ID="<your-backboard-assistant-id>"
+export BACKBOARD_THREAD_ID="<your-backboard-thread-id>"
+
+# Emergency Contact (for fall/safety detection)
+export EMERGENCY_CONTACT="+1-555-911-0000"
+export EMERGENCY_CONTACT_NAME="Emergency Services"
+```
+
+> **Note**: Get actual credentials from `.env` file (not committed to git).
 
 ---
 
@@ -98,6 +114,61 @@ interface UserRule {
   action_type: string;
   action_params: Record<string, any>;
   enabled: boolean;
+}
+
+// Location History (for safety assessment baseline)
+interface LocationHistory {
+  user_id: string;
+  latitude: number;
+  longitude: number;
+  accuracy_meters?: number;
+  altitude_meters?: number;
+  speed_mps?: number;
+  heading_degrees?: number;
+  location_type: "routine" | "work" | "home" | "transit" | "unknown";
+  is_safe_zone: boolean;
+  visit_count: number;
+  first_seen_at?: string;    // ISO8601
+  last_seen_at?: string;     // ISO8601
+}
+
+// Safety Assessment (Backboard-delegated decisions)
+interface SafetyAssessment {
+  user_id: string;
+  trigger_type: "fall_detected" | "location_anomaly" | "struggle_detected" | "manual_check";
+  episode_id?: string;
+  
+  // Location metrics
+  current_lat?: number;
+  current_lng?: number;
+  distance_from_centroid_meters?: number;
+  nearest_safe_zone_meters?: number;
+  location_deviation_score?: number;  // 0.0 - 1.0
+  
+  // Struggle metrics
+  gyro_variance_x?: number;
+  gyro_variance_y?: number;
+  gyro_variance_z?: number;
+  struggle_duration_ms?: number;
+  struggle_intensity_score?: number;  // 0.0 - 1.0
+  
+  // Backboard decision
+  backboard_thread_id?: string;
+  backboard_response?: string;
+  safety_concern_level: "none" | "low" | "medium" | "high" | "critical";
+  recommended_action?: "none" | "monitor" | "passcode_challenge" | "countdown_alert" | "immediate_call";
+  requires_passcode_challenge: boolean;
+  
+  // Passcode challenge flow
+  passcode_prompted_at?: string;      // ISO8601
+  passcode_verified?: boolean;
+  passcode_timeout_at?: string;       // ISO8601
+  
+  // Outcome
+  final_action_taken?: string;
+  false_positive?: boolean;
+  user_feedback?: string;
+  resolved_at?: string;               // ISO8601
 }
 ```
 
@@ -862,6 +933,349 @@ curl -s -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memo
 echo "False positive flow complete - emergency call cancelled by user"
 ```
 
+### Scenario 6: Safety Assessment with Backboard Decision
+
+This simulates: struggle detected + location anomaly → Backboard assessment → passcode challenge → timeout → emergency call
+
+```bash
+#!/bin/bash
+# Run from project root
+# Full safety assessment flow with Backboard delegation
+
+source .env
+
+USER_ID="demo_user"
+CURRENT_LAT=37.7850
+CURRENT_LNG=-122.4300
+TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+echo "=== SAFETY ASSESSMENT FLOW ==="
+echo "Timestamp: $TIMESTAMP"
+echo ""
+
+# 1. Log location to location_history
+echo "Step 1: Logging current location..."
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/location_history" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "'$USER_ID'",
+    "latitude": '$CURRENT_LAT',
+    "longitude": '$CURRENT_LNG',
+    "accuracy_meters": 15.0,
+    "speed_mps": 0.5,
+    "location_type": "unknown",
+    "is_safe_zone": false
+  }]'
+
+# 2. Log erratic gyroscope data (struggle signature)
+echo ""
+echo "Step 2: Logging struggle sensor data..."
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/sensor_events" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "'$USER_ID'",
+    "sensor_type": "motion_2hz",
+    "payload_json": {
+      "accel_x": 2.5,
+      "accel_y": -8.2,
+      "accel_z": -4.1,
+      "gyro_x": 2.8,
+      "gyro_y": 3.5,
+      "gyro_z": 2.1
+    },
+    "derived_json": {
+      "accel_norm": 9.6,
+      "gyro_norm": 4.9,
+      "is_flat": false,
+      "is_face_down": false,
+      "struggle_detected": true,
+      "gyro_variance_x": 2.5,
+      "gyro_variance_y": 3.1,
+      "gyro_variance_z": 1.8
+    }
+  }]'
+
+# 3. Calculate location metrics
+echo ""
+echo "Step 3: Calculating location deviation..."
+
+# Simulate centroid calculation (in real impl, query location_history)
+CENTROID_LAT=37.7749
+CENTROID_LNG=-122.4194
+DISTANCE_FROM_CENTROID=1250  # meters
+NEAREST_SAFE_ZONE=800  # meters
+LOCATION_DEVIATION_SCORE=0.72
+
+# Struggle metrics
+GYRO_VAR_X=2.5
+GYRO_VAR_Y=3.1
+GYRO_VAR_Z=1.8
+STRUGGLE_DURATION_MS=2500
+STRUGGLE_INTENSITY=$(echo "scale=2; sqrt($GYRO_VAR_X^2 + $GYRO_VAR_Y^2 + $GYRO_VAR_Z^2) / 6.0 * $STRUGGLE_DURATION_MS / 3000" | bc)
+
+echo "Distance from centroid: ${DISTANCE_FROM_CENTROID}m"
+echo "Nearest safe zone: ${NEAREST_SAFE_ZONE}m"
+echo "Struggle intensity: $STRUGGLE_INTENSITY"
+
+# 4. Send assessment request to Backboard
+echo ""
+echo "Step 4: Requesting Backboard safety assessment..."
+
+ASSESSMENT_PROMPT="[SAFETY_ASSESSMENT_REQUEST]
+User: $USER_ID
+Timestamp: $TIMESTAMP
+Trigger: struggle_detected
+
+LOCATION CONTEXT:
+- Current position: ($CURRENT_LAT, $CURRENT_LNG)
+- Distance from historical centroid: ${DISTANCE_FROM_CENTROID}m
+- Nearest safe zone: ${NEAREST_SAFE_ZONE}m
+- Location deviation score: $LOCATION_DEVIATION_SCORE
+
+MOTION CONTEXT:
+- Struggle detected: yes
+- Struggle intensity: $STRUGGLE_INTENSITY
+- Struggle duration: ${STRUGGLE_DURATION_MS}ms
+- Gyro variance (x,y,z): ($GYRO_VAR_X, $GYRO_VAR_Y, $GYRO_VAR_Z)
+
+HISTORICAL CONTEXT:
+- Time of day: $(date +%H:%M)
+- Day of week: $(date +%A)
+- User typical location at this time: unknown
+
+Based on this context and the user historical patterns in your memory, assess the safety concern level and recommend an action.
+
+Respond in this format:
+CONCERN_LEVEL: none|low|medium|high|critical
+RECOMMENDED_ACTION: none|monitor|passcode_challenge|countdown_alert|immediate_call
+REASONING: <brief explanation>"
+
+BACKBOARD_RESPONSE=$(curl -s -X POST "${BACKBOARD_BASE_URL}/threads/${BACKBOARD_THREAD_ID}/messages" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "'"$(echo "$ASSESSMENT_PROMPT" | sed 's/"/\\"/g' | tr '\n' ' ')"'",
+    "stream": false,
+    "memory": "Auto"
+  }')
+
+echo "Backboard response:"
+echo "$BACKBOARD_RESPONSE" | jq -r '.content' 2>/dev/null || echo "$BACKBOARD_RESPONSE"
+
+# 5. Log safety assessment to InsForge
+echo ""
+echo "Step 5: Logging safety assessment..."
+
+ASSESSMENT_RESPONSE=$(curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/safety_assessments" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "'$USER_ID'",
+    "trigger_type": "struggle_detected",
+    "current_lat": '$CURRENT_LAT',
+    "current_lng": '$CURRENT_LNG',
+    "distance_from_centroid_meters": '$DISTANCE_FROM_CENTROID',
+    "nearest_safe_zone_meters": '$NEAREST_SAFE_ZONE',
+    "location_deviation_score": '$LOCATION_DEVIATION_SCORE',
+    "gyro_variance_x": '$GYRO_VAR_X',
+    "gyro_variance_y": '$GYRO_VAR_Y',
+    "gyro_variance_z": '$GYRO_VAR_Z',
+    "struggle_duration_ms": '$STRUGGLE_DURATION_MS',
+    "struggle_intensity_score": 0.65,
+    "backboard_thread_id": "'$BACKBOARD_THREAD_ID'",
+    "backboard_response": "MEDIUM concern - user at unfamiliar location with erratic movement",
+    "safety_concern_level": "medium",
+    "recommended_action": "passcode_challenge",
+    "requires_passcode_challenge": true,
+    "passcode_prompted_at": "'$TIMESTAMP'"
+  }]')
+
+ASSESSMENT_ID=$(echo "$ASSESSMENT_RESPONSE" | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+echo "Assessment ID: $ASSESSMENT_ID"
+
+# 6. Simulate passcode timeout (60 seconds in real impl)
+echo ""
+echo "Step 6: Simulating passcode challenge timeout..."
+TIMEOUT_TS=$(date -u -d '+60 seconds' +%Y-%m-%dT%H:%M:%SZ)
+
+curl -s -X PATCH "${INSFORGE_BASE_URL}/api/database/records/safety_assessments?id=eq.$ASSESSMENT_ID" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "passcode_timeout_at": "'$TIMEOUT_TS'",
+    "passcode_verified": false
+  }'
+
+# 7. Escalate to countdown alert
+echo ""
+echo "Step 7: Escalating to emergency countdown..."
+
+# Log episode
+EPISODE_RESPONSE=$(curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/episode_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "'$USER_ID'",
+    "episode_type": "safety_concern",
+    "start_ts": "'$TIMESTAMP'",
+    "end_ts": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "confidence": 0.72,
+    "context_json": {
+      "trigger": "struggle_detected",
+      "location_deviation": '$LOCATION_DEVIATION_SCORE',
+      "struggle_intensity": 0.65,
+      "backboard_concern": "medium",
+      "passcode_timeout": true,
+      "detector_version": "v1",
+      "source": "safety_assessment_pipeline"
+    }
+  }]')
+EPISODE_ID=$(echo "$EPISODE_RESPONSE" | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+
+# 8. Execute emergency call after countdown
+echo ""
+echo "Step 8: Executing emergency call (after 30s countdown)..."
+
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/action_log" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "'$USER_ID'",
+    "episode_id": '$EPISODE_ID',
+    "action_type": "call_emergency_contact",
+    "action_payload": {
+      "contact_number": "'${EMERGENCY_CONTACT:-+1-555-911-0000}'",
+      "contact_name": "'${EMERGENCY_CONTACT_NAME:-Emergency Services}'",
+      "reason": "safety_concern_passcode_timeout",
+      "location": {"lat": '$CURRENT_LAT', "lng": '$CURRENT_LNG'},
+      "assessment_id": "'$ASSESSMENT_ID'"
+    },
+    "status": "executed",
+    "result_json": {
+      "decision_source": "backboard",
+      "confidence_score": 0.72,
+      "backboard_concern": "medium",
+      "passcode_timeout": true,
+      "auto_triggered": true,
+      "execution_success": true
+    }
+  }]'
+
+# 9. Update assessment with final action
+curl -s -X PATCH "${INSFORGE_BASE_URL}/api/database/records/safety_assessments?id=eq.$ASSESSMENT_ID" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "final_action_taken": "call_emergency_contact",
+    "resolved_at": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+  }'
+
+# 10. Write to Backboard memory
+echo ""
+echo "Step 9: Writing safety event to Backboard memory..."
+
+curl -s -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "[safety_events] user:'$USER_ID' '$TIMESTAMP' struggle detected at unfamiliar location ('$DISTANCE_FROM_CENTROID'm from centroid), passcode timeout after 60s, emergency call placed",
+    "metadata": {
+      "namespace": "safety_events",
+      "user_id": "'$USER_ID'",
+      "event_type": "safety_concern_escalated",
+      "severity": "high"
+    }
+  }'
+
+echo ""
+echo "==================================="
+echo "SAFETY ASSESSMENT FLOW COMPLETE"
+echo "==================================="
+echo "Assessment ID: $ASSESSMENT_ID"
+echo "Episode ID: $EPISODE_ID"
+echo "Concern Level: medium"
+echo "Final Action: call_emergency_contact"
+echo "==================================="
+```
+
+### Scenario 7: Safety Assessment - User Verifies Passcode
+
+```bash
+#!/bin/bash
+# User successfully enters passcode (false positive safety concern)
+
+source .env
+
+USER_ID="demo_user"
+TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# 1. Create assessment
+ASSESSMENT_RESPONSE=$(curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/safety_assessments" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: return=representation" \
+  -d '[{
+    "user_id": "'$USER_ID'",
+    "trigger_type": "location_anomaly",
+    "current_lat": 37.8000,
+    "current_lng": -122.4500,
+    "distance_from_centroid_meters": 2500,
+    "nearest_safe_zone_meters": 1500,
+    "location_deviation_score": 0.50,
+    "safety_concern_level": "low",
+    "recommended_action": "passcode_challenge",
+    "requires_passcode_challenge": true,
+    "passcode_prompted_at": "'$TIMESTAMP'"
+  }]')
+ASSESSMENT_ID=$(echo "$ASSESSMENT_RESPONSE" | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+
+# 2. User enters correct passcode within 60s
+curl -s -X PATCH "${INSFORGE_BASE_URL}/api/database/records/safety_assessments?id=eq.$ASSESSMENT_ID" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "passcode_verified": true,
+    "false_positive": true,
+    "final_action_taken": "none",
+    "resolved_at": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+    "user_feedback": "Was at new coffee shop"
+  }'
+
+# 3. Write false positive to Backboard (helps learn new safe locations)
+curl -s -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "[safety_events] user:'$USER_ID' '$TIMESTAMP' location anomaly false positive - user verified passcode at new location (2.5km from centroid). User feedback: was at new coffee shop",
+    "metadata": {
+      "namespace": "safety_events",
+      "user_id": "'$USER_ID'",
+      "event_type": "location_anomaly_false_positive",
+      "severity": "info"
+    }
+  }'
+
+# 4. Optionally mark new location as safe zone
+echo "Marking new location as potential safe zone..."
+curl -s -X POST "${INSFORGE_BASE_URL}/api/database/records/location_history" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '[{
+    "user_id": "'$USER_ID'",
+    "latitude": 37.8000,
+    "longitude": -122.4500,
+    "location_type": "routine",
+    "is_safe_zone": true,
+    "visit_count": 1
+  }]'
+
+echo "Passcode verified - false positive recorded"
+```
+
 ---
 
 ## Jac Integration Patterns
@@ -872,9 +1286,13 @@ echo "False positive flow complete - emergency call cancelled by user"
 # Using shell to make curl requests
 can log_sensor_event(payload: dict) -> dict {
     import:py subprocess;
+    import:py os;
     
-    cmd = f'''curl -s -X POST "https://ww8eiidv.us-east.insforge.app/api/database/records/sensor_events" \
-        -H "Authorization: Bearer {ANON_KEY}" \
+    base_url = os.getenv("INSFORGE_BASE_URL", "");
+    anon_key = os.getenv("INSFORGE_ANON_KEY", "");
+    
+    cmd = f'''curl -s -X POST "{base_url}/api/database/records/sensor_events" \
+        -H "Authorization: Bearer {anon_key}" \
         -H "Content-Type: application/json" \
         -d '[{json.dumps(payload)}]' ''';
     
@@ -890,9 +1308,14 @@ can log_sensor_event(payload: dict) -> dict {
 can get_decision_context(user_id: str, query: str) -> list {
     import:py subprocess;
     import:py json;
+    import:py os;
     
-    cmd = f'''curl -s -X POST "https://app.backboard.io/api/assistants/67f63b37-0648-4e96-b084-1c4464bd350b/memories/search" \
-        -H "X-API-Key: {API_KEY}" \
+    base_url = os.getenv("BACKBOARD_BASE_URL", "https://app.backboard.io/api");
+    api_key = os.getenv("BACKBOARD_KEY", "");
+    assistant_id = os.getenv("BACKBOARD_ASSISTANT_ID", "");
+    
+    cmd = f'''curl -s -X POST "{base_url}/assistants/{assistant_id}/memories/search" \
+        -H "X-API-Key: {api_key}" \
         -H "Content-Type: application/json" \
         -d '{{"query": "user:{user_id} {query}", "limit": 5}}' ''';
     
@@ -1070,6 +1493,8 @@ walker fall_detector {
         import:py datetime;
         
         now = datetime.datetime.utcnow().isoformat() + "Z";
+        base_url = os.getenv("INSFORGE_BASE_URL", "");
+        anon_key = os.getenv("INSFORGE_ANON_KEY", "");
         
         payload = [{
             "user_id": fall.user_id,
@@ -1086,8 +1511,8 @@ walker fall_detector {
             }
         }];
         
-        cmd = f'''curl -s -X POST "https://ww8eiidv.us-east.insforge.app/api/database/records/episode_log" \
-            -H "Authorization: Bearer {os.getenv('INSFORGE_ANON_KEY')}" \
+        cmd = f'''curl -s -X POST "{base_url}/api/database/records/episode_log" \
+            -H "Authorization: Bearer {anon_key}" \
             -H "Content-Type: application/json" \
             -H "Prefer: return=representation" \
             -d '{json.dumps(payload)}' ''';
@@ -1100,6 +1525,9 @@ walker fall_detector {
     can execute_emergency_call(fall: fall_event, episode_id: str, contact: str, name: str) {
         import:py subprocess;
         import:py json;
+        
+        base_url = os.getenv("INSFORGE_BASE_URL", "");
+        anon_key = os.getenv("INSFORGE_ANON_KEY", "");
         
         payload = [{
             "user_id": fall.user_id,
@@ -1121,8 +1549,8 @@ walker fall_detector {
             }
         }];
         
-        cmd = f'''curl -s -X POST "https://ww8eiidv.us-east.insforge.app/api/database/records/action_log" \
-            -H "Authorization: Bearer {os.getenv('INSFORGE_ANON_KEY')}" \
+        cmd = f'''curl -s -X POST "{base_url}/api/database/records/action_log" \
+            -H "Authorization: Bearer {anon_key}" \
             -H "Content-Type: application/json" \
             -d '{json.dumps(payload)}' ''';
         
@@ -1133,6 +1561,10 @@ walker fall_detector {
     can write_safety_memory(fall: fall_event, contact: str) {
         import:py subprocess;
         import:py json;
+        
+        base_url = os.getenv("BACKBOARD_BASE_URL", "https://app.backboard.io/api");
+        api_key = os.getenv("BACKBOARD_KEY", "");
+        assistant_id = os.getenv("BACKBOARD_ASSISTANT_ID", "");
         
         content = f"[safety_events] user:{fall.user_id} FALL DETECTED - emergency call placed. Impact: {fall.impact_accel} m/s², confidence: {fall.confidence}";
         
@@ -1146,7 +1578,400 @@ walker fall_detector {
             }
         };
         
-        cmd = f'''curl -s -X POST "https://app.backboard.io/api/assistants/67f63b37-0648-4e96-b084-1c4464bd350b/memories" \
+        cmd = f'''curl -s -X POST "{base_url}/assistants/{assistant_id}/memories" \
+            -H "X-API-Key: {api_key}" \
+            -H "Content-Type: application/json" \
+            -d '{json.dumps(payload)}' ''';
+        
+        subprocess.run(cmd, shell=True, capture_output=True, text=True);
+    }
+}
+```
+
+### Pattern 5: Safety Assessment Walker (Backboard-Delegated)
+
+```jac
+import:py os;
+import:py subprocess;
+import:py json;
+import:py math;
+import:py datetime;
+
+# Safety assessment thresholds
+glob GYRO_VARIANCE_THRESHOLD = 1.5;    # rad/s² per axis
+glob STRUGGLE_MIN_DURATION_MS = 500;
+glob STRUGGLE_MAX_DURATION_MS = 5000;
+glob LOCATION_DEVIATION_MAX_M = 5000;  # 5km = max concern
+glob PASSCODE_TIMEOUT_SEC = 60;
+glob COUNTDOWN_SEC = 30;
+
+# Backboard config (from environment)
+glob BACKBOARD_BASE_URL = os.getenv("BACKBOARD_BASE_URL", "https://app.backboard.io/api");
+glob BACKBOARD_ASSISTANT_ID = os.getenv("BACKBOARD_ASSISTANT_ID", "");
+glob BACKBOARD_THREAD_ID = os.getenv("BACKBOARD_THREAD_ID", "");
+
+# InsForge config (from environment)
+glob INSFORGE_BASE_URL = os.getenv("INSFORGE_BASE_URL", "");
+
+node location_sample {
+    has lat: float;
+    has lng: float;
+    has accuracy_m: float;
+    has timestamp: float;
+}
+
+node gyro_sample {
+    has variance_x: float;
+    has variance_y: float;
+    has variance_z: float;
+    has duration_ms: int;
+    has timestamp: float;
+}
+
+node safety_context {
+    has user_id: str;
+    has trigger_type: str;
+    has current_location: dict;
+    has location_metrics: dict;
+    has struggle_metrics: dict;
+    has time_context: dict;
+}
+
+node backboard_decision {
+    has concern_level: str;
+    has recommended_action: str;
+    has reasoning: str;
+    has raw_response: str;
+}
+
+walker safety_assessor {
+    has location_history: list = [];
+    has gyro_window: list = [];
+    
+    # Haversine distance calculation
+    can haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float {
+        R = 6371000;  # Earth radius in meters
+        phi1 = math.radians(lat1);
+        phi2 = math.radians(lat2);
+        delta_phi = math.radians(lat2 - lat1);
+        delta_lambda = math.radians(lng2 - lng1);
+        
+        a = math.sin(delta_phi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda/2)**2;
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a));
+        
+        return R * c;
+    }
+    
+    # Calculate location centroid from history
+    can get_location_centroid(user_id: str) -> dict {
+        # In real impl, query InsForge location_history
+        # For now, return mock centroid
+        return {"lat": 37.7749, "lng": -122.4194};
+    }
+    
+    # Find nearest safe zone
+    can get_nearest_safe_zone(user_id: str, current_lat: float, current_lng: float) -> float {
+        # In real impl, query location_history WHERE is_safe_zone = true
+        # Return distance to nearest safe zone
+        return 800.0;  # Mock: 800m to nearest safe zone
+    }
+    
+    # Calculate struggle intensity from gyro variance
+    can calculate_struggle_intensity(var_x: float, var_y: float, var_z: float, duration_ms: int) -> float {
+        variance_total = math.sqrt(var_x**2 + var_y**2 + var_z**2);
+        return min(1.0, (variance_total / 6.0) * (duration_ms / 3000.0));
+    }
+    
+    # Detect struggle pattern from gyro samples
+    can detect_struggle with gyro_sample entry {
+        self.gyro_window.append(here);
+        if len(self.gyro_window) > 20 {
+            self.gyro_window.pop(0);
+        }
+        
+        # Check for multi-axis instability
+        axes_over_threshold = 0;
+        if here.variance_x > GYRO_VARIANCE_THRESHOLD { axes_over_threshold += 1; }
+        if here.variance_y > GYRO_VARIANCE_THRESHOLD { axes_over_threshold += 1; }
+        if here.variance_z > GYRO_VARIANCE_THRESHOLD { axes_over_threshold += 1; }
+        
+        if axes_over_threshold >= 2 and here.duration_ms >= STRUGGLE_MIN_DURATION_MS {
+            # Struggle detected - trigger safety assessment
+            intensity = self.calculate_struggle_intensity(
+                here.variance_x, here.variance_y, here.variance_z, here.duration_ms
+            );
+            
+            if intensity > 0.4 {
+                print(f"STRUGGLE DETECTED: intensity={intensity}");
+                # Create safety context and visit
+                ctx = safety_context(
+                    user_id="demo_user",
+                    trigger_type="struggle_detected",
+                    current_location={"lat": 37.7850, "lng": -122.4300},  # From GPS
+                    location_metrics={},
+                    struggle_metrics={
+                        "variance_x": here.variance_x,
+                        "variance_y": here.variance_y,
+                        "variance_z": here.variance_z,
+                        "duration_ms": here.duration_ms,
+                        "intensity": intensity
+                    },
+                    time_context={
+                        "time": datetime.datetime.now().strftime("%H:%M"),
+                        "day": datetime.datetime.now().strftime("%A")
+                    }
+                );
+                visit ctx;
+            }
+        }
+    }
+    
+    # Check for location anomaly
+    can check_location with location_sample entry {
+        centroid = self.get_location_centroid("demo_user");
+        distance = self.haversine(here.lat, here.lng, centroid["lat"], centroid["lng"]);
+        deviation_score = min(1.0, distance / LOCATION_DEVIATION_MAX_M);
+        
+        if deviation_score > 0.5 {  # More than 2.5km from centroid
+            print(f"LOCATION ANOMALY: {distance}m from centroid");
+            
+            nearest_safe = self.get_nearest_safe_zone("demo_user", here.lat, here.lng);
+            
+            ctx = safety_context(
+                user_id="demo_user",
+                trigger_type="location_anomaly",
+                current_location={"lat": here.lat, "lng": here.lng},
+                location_metrics={
+                    "distance_from_centroid": distance,
+                    "deviation_score": deviation_score,
+                    "nearest_safe_zone": nearest_safe
+                },
+                struggle_metrics={},
+                time_context={
+                    "time": datetime.datetime.now().strftime("%H:%M"),
+                    "day": datetime.datetime.now().strftime("%A")
+                }
+            );
+            visit ctx;
+        }
+    }
+    
+    # Request Backboard assessment
+    can request_assessment with safety_context entry {
+        print(f"Requesting Backboard assessment for {here.trigger_type}...");
+        
+        # Build assessment prompt
+        prompt = self.build_assessment_prompt(here);
+        
+        # Send to Backboard
+        response = self.send_to_backboard(prompt);
+        
+        # Parse response
+        decision = self.parse_backboard_response(response);
+        decision.raw_response = response;
+        
+        # Log to InsForge
+        assessment_id = self.log_assessment(here, decision);
+        
+        print(f"Backboard decision: {decision.concern_level} -> {decision.recommended_action}");
+        
+        # Execute recommended action
+        if decision.recommended_action == "passcode_challenge" {
+            self.execute_passcode_challenge(here, decision, assessment_id);
+        } elif decision.recommended_action == "countdown_alert" {
+            self.execute_countdown_alert(here, decision, assessment_id);
+        } elif decision.recommended_action == "immediate_call" {
+            self.execute_emergency_call(here, decision, assessment_id);
+        }
+    }
+    
+    can build_assessment_prompt(ctx: safety_context) -> str {
+        prompt = f"""[SAFETY_ASSESSMENT_REQUEST]
+User: {ctx.user_id}
+Timestamp: {datetime.datetime.utcnow().isoformat()}Z
+Trigger: {ctx.trigger_type}
+
+LOCATION CONTEXT:
+- Current position: ({ctx.current_location.get('lat', 0)}, {ctx.current_location.get('lng', 0)})
+- Distance from historical centroid: {ctx.location_metrics.get('distance_from_centroid', 'unknown')}m
+- Nearest safe zone: {ctx.location_metrics.get('nearest_safe_zone', 'unknown')}m
+- Location deviation score: {ctx.location_metrics.get('deviation_score', 0)}
+
+MOTION CONTEXT:
+- Struggle detected: {'yes' if ctx.struggle_metrics else 'no'}
+- Struggle intensity: {ctx.struggle_metrics.get('intensity', 0)}
+- Struggle duration: {ctx.struggle_metrics.get('duration_ms', 0)}ms
+- Gyro variance (x,y,z): ({ctx.struggle_metrics.get('variance_x', 0)}, {ctx.struggle_metrics.get('variance_y', 0)}, {ctx.struggle_metrics.get('variance_z', 0)})
+
+HISTORICAL CONTEXT:
+- Time of day: {ctx.time_context.get('time', 'unknown')}
+- Day of week: {ctx.time_context.get('day', 'unknown')}
+
+Based on this context and the user's historical patterns in your memory, assess the safety concern level and recommend an action.
+
+Respond in this format:
+CONCERN_LEVEL: none|low|medium|high|critical
+RECOMMENDED_ACTION: none|monitor|passcode_challenge|countdown_alert|immediate_call
+REASONING: <brief explanation>""";
+        
+        return prompt;
+    }
+    
+    can send_to_backboard(prompt: str) -> str {
+        import:py subprocess;
+        import:py json;
+        
+        payload = {
+            "content": prompt,
+            "stream": False,
+            "memory": "Auto"
+        };
+        
+        cmd = f'''curl -s -X POST "{BACKBOARD_BASE_URL}/threads/{BACKBOARD_THREAD_ID}/messages" \
+            -H "X-API-Key: {os.getenv('BACKBOARD_KEY')}" \
+            -H "Content-Type: application/json" \
+            -d '{json.dumps(payload)}' ''';
+        
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True);
+        data = json.loads(result.stdout);
+        return data.get("content", "");
+    }
+    
+    can parse_backboard_response(response: str) -> backboard_decision {
+        # Parse structured response from Backboard
+        concern = "medium";  # Default
+        action = "passcode_challenge";
+        reasoning = "";
+        
+        lines = response.split("\n");
+        for line in lines {
+            if line.startswith("CONCERN_LEVEL:") {
+                concern = line.split(":")[1].strip().lower();
+            } elif line.startswith("RECOMMENDED_ACTION:") {
+                action = line.split(":")[1].strip().lower();
+            } elif line.startswith("REASONING:") {
+                reasoning = line.split(":", 1)[1].strip();
+            }
+        }
+        
+        return backboard_decision(
+            concern_level=concern,
+            recommended_action=action,
+            reasoning=reasoning,
+            raw_response=""
+        );
+    }
+    
+    can log_assessment(ctx: safety_context, decision: backboard_decision) -> str {
+        import:py subprocess;
+        import:py json;
+        
+        payload = [{
+            "user_id": ctx.user_id,
+            "trigger_type": ctx.trigger_type,
+            "current_lat": ctx.current_location.get("lat"),
+            "current_lng": ctx.current_location.get("lng"),
+            "distance_from_centroid_meters": ctx.location_metrics.get("distance_from_centroid"),
+            "nearest_safe_zone_meters": ctx.location_metrics.get("nearest_safe_zone"),
+            "location_deviation_score": ctx.location_metrics.get("deviation_score"),
+            "gyro_variance_x": ctx.struggle_metrics.get("variance_x"),
+            "gyro_variance_y": ctx.struggle_metrics.get("variance_y"),
+            "gyro_variance_z": ctx.struggle_metrics.get("variance_z"),
+            "struggle_duration_ms": ctx.struggle_metrics.get("duration_ms"),
+            "struggle_intensity_score": ctx.struggle_metrics.get("intensity"),
+            "backboard_thread_id": BACKBOARD_THREAD_ID,
+            "backboard_response": decision.raw_response[:500] if decision.raw_response else "",
+            "safety_concern_level": decision.concern_level,
+            "recommended_action": decision.recommended_action,
+            "requires_passcode_challenge": decision.recommended_action == "passcode_challenge"
+        }];
+        
+        cmd = f'''curl -s -X POST "{INSFORGE_BASE_URL}/api/database/records/safety_assessments" \
+            -H "Authorization: Bearer {os.getenv('INSFORGE_ANON_KEY')}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=representation" \
+            -d '{json.dumps(payload)}' ''';
+        
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True);
+        data = json.loads(result.stdout);
+        return data[0].get("id", "unknown") if data else "unknown";
+    }
+    
+    can execute_passcode_challenge(ctx: safety_context, decision: backboard_decision, assessment_id: str) {
+        print(f"PASSCODE CHALLENGE: User has {PASSCODE_TIMEOUT_SEC}s to verify");
+        # In real impl:
+        # 1. Show passcode prompt UI
+        # 2. Start 60s timer
+        # 3. If verified -> mark false_positive, write to Backboard
+        # 4. If timeout -> escalate to countdown_alert
+    }
+    
+    can execute_countdown_alert(ctx: safety_context, decision: backboard_decision, assessment_id: str) {
+        print(f"COUNTDOWN ALERT: {COUNTDOWN_SEC}s until emergency call");
+        # In real impl:
+        # 1. Show countdown UI
+        # 2. If cancelled -> mark false_positive
+        # 3. If timeout -> execute_emergency_call
+    }
+    
+    can execute_emergency_call(ctx: safety_context, decision: backboard_decision, assessment_id: str) {
+        import:py subprocess;
+        import:py json;
+        
+        emergency_contact = os.getenv("EMERGENCY_CONTACT", "+1-555-911-0000");
+        emergency_name = os.getenv("EMERGENCY_CONTACT_NAME", "Emergency Services");
+        
+        print(f"EMERGENCY CALL: Calling {emergency_name} at {emergency_contact}");
+        
+        # Log action
+        payload = [{
+            "user_id": ctx.user_id,
+            "action_type": "call_emergency_contact",
+            "action_payload": {
+                "contact_number": emergency_contact,
+                "contact_name": emergency_name,
+                "reason": ctx.trigger_type,
+                "location": ctx.current_location,
+                "assessment_id": assessment_id
+            },
+            "status": "executed",
+            "result_json": {
+                "decision_source": "backboard",
+                "confidence_score": ctx.location_metrics.get("deviation_score", 0) + ctx.struggle_metrics.get("intensity", 0),
+                "backboard_concern": decision.concern_level,
+                "auto_triggered": True,
+                "execution_success": True
+            }
+        }];
+        
+        cmd = f'''curl -s -X POST "{INSFORGE_BASE_URL}/api/database/records/action_log" \
+            -H "Authorization: Bearer {os.getenv('INSFORGE_ANON_KEY')}" \
+            -H "Content-Type: application/json" \
+            -d '{json.dumps(payload)}' ''';
+        
+        subprocess.run(cmd, shell=True, capture_output=True, text=True);
+        
+        # Write to Backboard memory
+        self.write_safety_memory(ctx, decision, "emergency_call_placed");
+    }
+    
+    can write_safety_memory(ctx: safety_context, decision: backboard_decision, outcome: str) {
+        import:py subprocess;
+        import:py json;
+        
+        content = f"[safety_events] user:{ctx.user_id} {datetime.datetime.utcnow().isoformat()}Z {ctx.trigger_type} -> {decision.concern_level} concern -> {outcome}";
+        
+        payload = {
+            "content": content,
+            "metadata": {
+                "namespace": "safety_events",
+                "user_id": ctx.user_id,
+                "event_type": ctx.trigger_type,
+                "outcome": outcome
+            }
+        };
+        
+        cmd = f'''curl -s -X POST "{BACKBOARD_BASE_URL}/assistants/{BACKBOARD_ASSISTANT_ID}/memories" \
             -H "X-API-Key: {os.getenv('BACKBOARD_KEY')}" \
             -H "Content-Type: application/json" \
             -d '{json.dumps(payload)}' ''';
@@ -1180,6 +2005,49 @@ curl -s "${INSFORGE_BASE_URL}/api/database/records/episode_log?order=end_ts.desc
 # Recent actions
 curl -s "${INSFORGE_BASE_URL}/api/database/records/action_log?order=ts.desc&limit=5" \
   -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+
+# All user rules
+curl -s "${INSFORGE_BASE_URL}/api/database/records/user_rules?user_id=eq.demo_user" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+
+# User patterns
+curl -s "${INSFORGE_BASE_URL}/api/database/records/user_patterns?user_id=eq.demo_user" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+
+# User integrations
+curl -s "${INSFORGE_BASE_URL}/api/database/records/user_integrations?user_id=eq.demo_user" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+```
+
+### Check Location History Data
+
+```bash
+# All safe zones
+curl -s "${INSFORGE_BASE_URL}/api/database/records/location_history?user_id=eq.demo_user&is_safe_zone=eq.true" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+
+# Recent locations
+curl -s "${INSFORGE_BASE_URL}/api/database/records/location_history?user_id=eq.demo_user&order=last_seen_at.desc&limit=10" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+
+# Location centroid (approximate via SQL)
+# Use raw SQL for actual centroid calculation
+```
+
+### Check Safety Assessments
+
+```bash
+# Recent assessments
+curl -s "${INSFORGE_BASE_URL}/api/database/records/safety_assessments?user_id=eq.demo_user&order=created_at.desc&limit=10" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+
+# Unresolved assessments (pending passcode verification)
+curl -s "${INSFORGE_BASE_URL}/api/database/records/safety_assessments?user_id=eq.demo_user&resolved_at=is.null" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
+
+# False positives (for calibration analysis)
+curl -s "${INSFORGE_BASE_URL}/api/database/records/safety_assessments?user_id=eq.demo_user&false_positive=eq.true" \
+  -H "Authorization: Bearer ${INSFORGE_ANON_KEY}"
 ```
 
 ### Check Backboard Data
@@ -1188,6 +2056,12 @@ curl -s "${INSFORGE_BASE_URL}/api/database/records/action_log?order=ts.desc&limi
 # List all memories
 curl -s "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories" \
   -H "X-API-Key: ${BACKBOARD_API_KEY}"
+
+# Search safety event memories
+curl -s -X POST "${BACKBOARD_BASE_URL}/assistants/${BACKBOARD_ASSISTANT_ID}/memories/search" \
+  -H "X-API-Key: ${BACKBOARD_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "safety_events user:demo_user", "limit": 10}'
 
 # Get thread history
 curl -s "${BACKBOARD_BASE_URL}/threads/${BACKBOARD_THREAD_ID}" \
@@ -1199,4 +2073,58 @@ curl -s "${BACKBOARD_BASE_URL}/threads/${BACKBOARD_THREAD_ID}" \
 ## Environment Setup
 
 Add to your shell profile or source before running:
+
+```bash
+# Create .env file from template (fill in your actual credentials)
+cat > .env << 'EOF'
+# InsForge Backend
+INSFORGE_BASE_URL=https://your-project.region.insforge.app
+INSFORGE_ANON_KEY=<your-insforge-anon-key>
+
+# Backboard Memory
+BACKBOARD_BASE_URL=https://app.backboard.io/api
+BACKBOARD_KEY=<your-backboard-api-key>
+BACKBOARD_ASSISTANT_ID=<your-backboard-assistant-id>
+BACKBOARD_THREAD_ID=<your-backboard-thread-id>
+
+# Emergency Contact (Safety Features)
+EMERGENCY_CONTACT=+1-555-911-0000
+EMERGENCY_CONTACT_NAME=Emergency Services
+EOF
+
+# Source the environment
+set -a && source .env && set +a
+
+# Verify setup
+echo "InsForge URL: $INSFORGE_BASE_URL"
+echo "Backboard Assistant: $BACKBOARD_ASSISTANT_ID"
+echo "Emergency Contact: $EMERGENCY_CONTACT"
+```
+
+### Required Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `INSFORGE_BASE_URL` | InsForge API base URL | `https://your-project.region.insforge.app` |
+| `INSFORGE_ANON_KEY` | InsForge anonymous JWT token | (get from InsForge dashboard) |
+| `BACKBOARD_BASE_URL` | Backboard API base URL | `https://app.backboard.io/api` |
+| `BACKBOARD_KEY` | Backboard API key | (get from Backboard dashboard) |
+| `BACKBOARD_ASSISTANT_ID` | Backboard assistant UUID | (create via API or dashboard) |
+| `BACKBOARD_THREAD_ID` | Backboard conversation thread UUID | (create via API) |
+| `EMERGENCY_CONTACT` | Phone number for emergency calls | `+1-555-911-0000` |
+| `EMERGENCY_CONTACT_NAME` | Display name for emergency contact | `Emergency Services` |
+
+### Getting Credentials
+
+1. **InsForge**: 
+   - Base URL and anon key are pre-configured for this project
+   - For new projects, use `insforge_get-backend-metadata` MCP tool
+
+2. **Backboard**:
+   - API key available from Backboard.io dashboard
+   - Assistant and thread IDs created via `POST /assistants` and `POST /threads`
+
+3. **Emergency Contact**:
+   - Set to actual emergency contact for production use
+   - Demo uses placeholder number
 
