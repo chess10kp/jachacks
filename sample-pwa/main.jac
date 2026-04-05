@@ -89,6 +89,76 @@ walker MotionDecisionWalker {
     }
 }
 
+node EatingPredictionNode {
+    has destination_name: str = "";
+    has confidence_pct: int = 0;
+    has reason: str = "";
+    has source: str = "fallback";
+    has day_of_week: str = "";
+    has hour: int = 0;
+}
+
+walker PredictEatingDestinationWalker {
+    has context: dict;
+
+    can predict with Root entry {
+        hour = int(self.context.hour if self.context and self.context.hour is not None else 12);
+        day_of_week = self.context.day_of_week if self.context and self.context.day_of_week else "UNK";
+
+        destination = self.context.fallback_destination if self.context and self.context.fallback_destination else "Nearby food spot";
+        confidence = 38;
+        reason = "Fallback prediction based on meal time and day";
+        source = "time-day-fallback";
+
+        memory_destination = self.context.memory_destination if self.context and self.context.memory_destination else "";
+        memory_strength = Number(self.context.memory_strength if self.context and self.context.memory_strength is not None else 0);
+        memory_hits = Number(self.context.memory_hits if self.context and self.context.memory_hits is not None else 0);
+
+        if memory_destination and memory_strength > 0 {
+            destination = memory_destination;
+            confidence = 55 + int(Math.min(35, memory_strength * 14 + memory_hits * 3));
+            reason = "Historical eating location patterns align with current time and day";
+            source = "backboard+time-day";
+        } elif memory_hits > 0 {
+            confidence = confidence + 10;
+            reason = "Light historical signal combined with current time and day";
+            source = "light-memory+time-day";
+        }
+
+        if (day_of_week == "SAT" or day_of_week == "SUN") and source == "time-day-fallback" {
+            confidence = confidence + 6;
+            if hour >= 18 {
+                destination = "Neighborhood Bistro";
+            }
+        }
+
+        if confidence < 20 {
+            confidence = 20;
+        }
+        if confidence > 95 {
+            confidence = 95;
+        }
+
+        prediction = EatingPredictionNode(
+            destination_name=destination,
+            confidence_pct=confidence,
+            reason=reason,
+            source=source,
+            day_of_week=day_of_week,
+            hour=hour
+        );
+
+        report {
+            "destination_name": prediction.destination_name,
+            "confidence_pct": prediction.confidence_pct,
+            "reason": prediction.reason,
+            "source": prediction.source,
+            "day_of_week": prediction.day_of_week,
+            "hour": prediction.hour
+        };
+    }
+}
+
 cl {
     def insforge_base_url -> str {
         return "https://ww8eiidv.us-east.insforge.app";
@@ -125,6 +195,22 @@ cl {
 
     def emergency_contact_name -> str {
         return "Emergency Contact";
+    }
+
+    async def speak_text(text: str, voice_id: str = "") -> dict {
+        if not text or text.trim().length == 0 {
+            return {"ok": False, "reason": "empty_text"};
+        }
+
+        normalized = text.trim().toLowerCase();
+        if normalized == "do you wnat to place your usual order?" {
+            return {"ok": True, "audio_url": "/order.mp3"};
+        }
+        if normalized.indexOf("spicy chicken bowl") >= 0 {
+            return {"ok": True, "audio_url": "/spicy-chicken-bowl.mp3"};
+        }
+
+        return {"ok": False, "reason": "local_asset_not_found"};
     }
 
     def fall_detection_thresholds -> dict {
@@ -297,6 +383,83 @@ cl {
             print("backboard_read error", e);
             return {"ok": False, "memories": []};
         }
+    }
+
+    def day_code_from_date(d: Any) -> str {
+        day_idx = d.getDay();
+        days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+        return days[day_idx] if day_idx is not None and day_idx >= 0 and day_idx < days.length else "UNK";
+    }
+
+    def fallback_meal_destination(day_code: str, hour: int) -> str {
+        if hour >= 6 and hour < 11 {
+            return "foo bar";
+        }
+        if hour >= 11 and hour < 15 {
+            return "Downtown Lunch Hub";
+        }
+        if hour >= 15 and hour < 18 {
+            return "Coffee Corner";
+        }
+        if day_code == "SAT" or day_code == "SUN" {
+            return "Neighborhood Bistro";
+        }
+        return "City Food Court";
+    }
+
+    def extract_memory_destination(memory_result: dict) -> dict {
+        memories = memory_result.memories if memory_result and memory_result.memories else [];
+        if memories.length == 0 {
+            return {
+                "memory_destination": "",
+                "memory_strength": 0,
+                "memory_hits": 0
+            };
+        }
+
+        first_memory = memories[0];
+        content = String(first_memory.content if first_memory and first_memory.content else "");
+        metadata = first_memory.metadata if first_memory and first_memory.metadata else {};
+
+        destination = "";
+        if metadata and metadata.destination_name {
+            destination = String(metadata.destination_name);
+        }
+
+        if not destination and content {
+            marker = "destination:";
+            idx = content.toLowerCase().indexOf(marker);
+            if idx >= 0 {
+                start = idx + marker.length;
+                raw_tail = content.slice(start).trim();
+                comma_idx = raw_tail.indexOf(",");
+                period_idx = raw_tail.indexOf(".");
+                stop_idx = -1;
+                if comma_idx >= 0 and period_idx >= 0 {
+                    stop_idx = Math.min(comma_idx, period_idx);
+                } elif comma_idx >= 0 {
+                    stop_idx = comma_idx;
+                } elif period_idx >= 0 {
+                    stop_idx = period_idx;
+                }
+                destination = raw_tail.slice(0, stop_idx).trim() if stop_idx >= 0 else raw_tail;
+            }
+        }
+
+        if not destination {
+            destination = "";
+        }
+
+        score = Number(first_memory.score if first_memory and first_memory.score is not None else 0);
+        if Number.isNaN(score) {
+            score = 0;
+        }
+
+        return {
+            "memory_destination": destination,
+            "memory_strength": score,
+            "memory_hits": memories.length
+        };
     }
 
     async def backboard_write(namespace: str, content: str, metadata: dict = {}) -> dict {
@@ -533,6 +696,31 @@ cl {
         # Hardcoded location coordinates
         HARDCODED_LAT = 42.2929877;
         HARDCODED_LNG = -83.7166082;
+        
+        # Workflow prompt state
+        [workflowPrompt, setWorkflowPrompt] = useState("Monitor for falls and alert emergency contacts");
+        [workflowCreated, setWorkflowCreated] = useState(False);
+        [isCreatingWorkflow, setIsCreatingWorkflow] = useState(False);
+
+        # Next meal prediction state
+        [isPredictingDestination, setIsPredictingDestination] = useState(False);
+        [eatingPrediction, setEatingPrediction] = useState(None);
+        [eatingPredictionError, setEatingPredictionError] = useState("");
+        [mealOrderStatus, setMealOrderStatus] = useState("");
+        [showVoiceInputUi, setShowVoiceInputUi] = useState(False);
+        [voiceInputSecondsLeft, setVoiceInputSecondsLeft] = useState(0);
+        [lastTtsError, setLastTtsError] = useState("");
+        [showVoiceReplay, setShowVoiceReplay] = useState(False);
+        [predictionLoadingStep, setPredictionLoadingStep] = useState(0);
+        [predictionLoadingLocation, setPredictionLoadingLocation] = useState("");
+        predictionAnimRef = useRef(None);
+
+        # ElevenLabs TTS state
+        [ttsText, setTtsText] = useState("");
+        [ttsLoading, setTtsLoading] = useState(False);
+        [ttsPlaying, setTtsPlaying] = useState(False);
+        ttsAudioRef = useRef(None);
+        ttsUnlockedRef = useRef(False);
 
         agentConfig = {
             "apiEndpoint": "",
@@ -1012,7 +1200,6 @@ cl {
         }
         
         def cancel_demo_timer -> None {
-            # Docstring removed
             if demoTimerRef.current {
                 clearInterval(demoTimerRef.current);
                 demoTimerRef.current = None;
@@ -1027,6 +1214,342 @@ cl {
                     "source": "demo"
                 }]);
             });
+        }
+
+        def create_workflow -> None {
+            print("Creating workflow...");
+            setIsCreatingWorkflow(True);
+            
+            # Simulate workflow creation delay
+            setTimeout(
+                lambda -> None {
+                    setIsCreatingWorkflow(False);
+                    # Just log success and return to form (don't show Fall Detection Active screen)
+                    setDecisions(lambda prev: list -> list {
+                        return prev.slice(-9).concat([{
+                            "type": "log",
+                            "message": "Workflow created successfully",
+                            "priority": 1,
+                            "source": "workflow"
+                        }]);
+                    });
+                },
+                1500
+            );
+        }
+
+        async def play_tts -> None {
+            if not ttsText or ttsText.trim().length == 0 {
+                return;
+            }
+
+            setTtsLoading(True);
+            result = await speak_text(ttsText.trim());
+
+            if result and result.ok and result.audio_url {
+                audio = Reflect.construct(Audio, [result.audio_url]);
+                ttsAudioRef.current = audio;
+                
+                audio.onended = lambda -> None {
+                    setTtsPlaying(False);
+                    URL.revokeObjectURL(result.audio_url);
+                };
+
+                audio.play();
+                setTtsPlaying(True);
+            } else {
+                setDecisions(lambda prev: list -> list {
+                    return prev.slice(-9).concat([{
+                        "type": "notify",
+                        "message": "TTS failed: " + (result.reason if result and result.reason else "unknown error"),
+                        "priority": 1,
+                        "source": "tts"
+                    }]);
+                });
+            }
+
+            setTtsLoading(False);
+        }
+
+        def stop_tts -> None {
+            if ttsAudioRef.current {
+                ttsAudioRef.current.pause();
+                ttsAudioRef.current = None;
+            }
+            setTtsPlaying(False);
+        }
+
+        def unlock_audio_output -> None {
+            if ttsUnlockedRef.current {
+                return;
+            }
+
+            warm_audio = Reflect.construct(Audio, ["data:audio/mpeg;base64,SUQzAwAAAAAA"]);
+            warm_audio.play().then(lambda -> None {
+                warm_audio.pause();
+                warm_audio.src = "";
+                ttsUnlockedRef.current = True;
+            }).catch(lambda -> None {
+                ;
+            });
+        }
+
+        def speak_browser_fallback(text: str) -> bool {
+            try {
+                synth = Reflect.get(globalThis, "speechSynthesis");
+                utter_ctor = Reflect.get(globalThis, "SpeechSynthesisUtterance");
+                if synth and utter_ctor {
+                    utter = Reflect.construct(utter_ctor, [text]);
+                    utter.rate = 1.0;
+                    utter.pitch = 1.0;
+                    utter.volume = 1.0;
+                    synth.cancel();
+                    synth.speak(utter);
+                    return True;
+                }
+            } except Exception as e {
+                ;
+            }
+            return False;
+        }
+
+        def play_local_audio(file_name: str) -> None {
+            if not file_name or file_name.trim().length == 0 {
+                return;
+            }
+
+            origin = "";
+            try {
+                origin = String(window.location.origin if window and window.location and window.location.origin else "");
+            } except Exception as e {
+                ;
+            }
+
+            candidates = [
+                "/" + file_name,
+                "./" + file_name,
+                file_name,
+                "capacitor://localhost/" + file_name,
+                origin + "/" + file_name if origin and origin.length > 0 else ""
+            ];
+
+            def try_play_candidate(idx: int) -> None {
+                if idx >= candidates.length {
+                    setTtsPlaying(False);
+                    setShowVoiceReplay(True);
+                    setLastTtsError("audio_play_failed_" + file_name);
+                    return;
+                }
+
+                src = candidates[idx];
+                if not src or src.trim().length == 0 {
+                    try_play_candidate(idx + 1);
+                    return;
+                }
+                try {
+                    audio = Reflect.construct(Audio, [src]);
+                    ttsAudioRef.current = audio;
+                    setTtsPlaying(True);
+                    audio.onended = lambda -> None {
+                        setTtsPlaying(False);
+                    };
+                    audio.play().then(lambda -> None {
+                        setShowVoiceReplay(False);
+                    }).catch(lambda -> None {
+                        try_play_candidate(idx + 1);
+                    });
+                } except Exception as e {
+                    try_play_candidate(idx + 1);
+                }
+            }
+
+            try {
+                try_play_candidate(0);
+            } except Exception as e {
+                setShowVoiceReplay(True);
+                setLastTtsError("audio_init_failed_" + file_name);
+            }
+        }
+
+        def queue_local_audio(file_name: str) -> None {
+            current_audio = ttsAudioRef.current;
+            if current_audio and not current_audio.paused {
+                prior_onended = current_audio.onended;
+                current_audio.onended = lambda -> None {
+                    if prior_onended {
+                        prior_onended();
+                    }
+                    play_local_audio(file_name);
+                };
+                return;
+            }
+            play_local_audio(file_name);
+        }
+
+        def open_sms_invite_after_llm -> None {
+            sms_body = "you wanna join me for a quick bite rn?";
+            sms_number = emergency_contact();
+            sms_url = "sms:" + sms_number + "?body=" + encodeURIComponent(sms_body);
+            window.open(sms_url, "_self");
+        }
+
+        def speak_assistant_prompt(text: str) -> None {
+            if not text or text.trim().length == 0 {
+                return;
+            }
+
+            setLastTtsError("");
+            unlock_audio_output();
+
+            if text.trim().toLowerCase() == "do you wnat to place your usual order?" {
+                Haptics.impact({"style": ImpactStyle.Light});
+                play_local_audio("order.mp3");
+                return;
+            }
+
+            used_browser = speak_browser_fallback(text.trim());
+            if used_browser {
+                setShowVoiceReplay(False);
+                return;
+            }
+
+            setShowVoiceReplay(False);
+            Haptics.impact({"style": ImpactStyle.Medium});
+            setDecisions(lambda prev: list -> list {
+                return prev.slice(-9).concat([{
+                    "type": "notify",
+                    "message": "Voice unavailable on this device. Continuing with text prompt.",
+                    "priority": 1,
+                    "source": "tts"
+                }]);
+            });
+        }
+        def predict_next_eating_destination -> None {
+            if isPredictingDestination {
+                return;
+            }
+
+            unlock_audio_output();
+
+            setIsPredictingDestination(True);
+            setEatingPredictionError("");
+            setMealOrderStatus("");
+            setShowVoiceInputUi(False);
+            setVoiceInputSecondsLeft(0);
+            setLastTtsError("");
+            setShowVoiceReplay(False);
+
+            geo = sensorData.geolocation if sensorData and sensorData.geolocation else None;
+            loc_lat = geo.lat if geo and geo.lat is not None else HARDCODED_LAT;
+            loc_lng = geo.lng if geo and geo.lng is not None else HARDCODED_LNG;
+            setPredictionLoadingLocation(String(loc_lat) + ", " + String(loc_lng));
+            setPredictionLoadingStep(0);
+
+            if predictionAnimRef.current {
+                clearInterval(predictionAnimRef.current);
+                predictionAnimRef.current = None;
+            }
+
+            predictionAnimRef.current = setInterval(
+                lambda -> None {
+                    setPredictionLoadingStep(lambda prev: int -> int {
+                        next_step = prev + 1;
+                        if next_step >= 3 {
+                            clearInterval(predictionAnimRef.current);
+                            predictionAnimRef.current = None;
+
+                            now = Reflect.construct(Date, []);
+                            hour = now.getHours();
+                            day_code = day_code_from_date(now);
+
+                            pred = {
+                                "destination_name": fallback_meal_destination(day_code, hour),
+                                "confidence_pct": 72 if (hour >= 11 and hour <= 14) else (68 if hour >= 18 else 61),
+                                "reason": "Demo prediction from current time/day window",
+                                "source": "hardcoded-demo",
+                                "day_of_week": day_code,
+                                "hour": hour
+                            };
+
+                            if day_code == "SAT" or day_code == "SUN" {
+                                pred.destination_name = "Neighborhood Bistro";
+                                pred.confidence_pct = 76;
+                                pred.reason = "Demo weekend pattern";
+                            }
+
+                            if hour >= 6 and hour < 10 {
+                                pred.destination_name = "foo bar";
+                                pred.confidence_pct = 74;
+                            } elif hour >= 15 and hour < 18 {
+                                pred.destination_name = "Coffee Corner";
+                                pred.confidence_pct = 69;
+                            }
+
+                            setEatingPrediction(pred);
+                            setIsPredictingDestination(False);
+
+                            if pred.destination_name == "foo bar" or pred.destination_name == "Campus Cafe" {
+                                setMealOrderStatus("Assistant: do you wnat to place your usual order?");
+                                speak_assistant_prompt("do you wnat to place your usual order?");
+
+                                setTimeout(
+                                    lambda -> None {
+                                        setShowVoiceInputUi(True);
+                                        setVoiceInputSecondsLeft(4);
+
+                                        voiceTickRef = {"id": None};
+                                        voiceTickRef.id = setInterval(
+                                            lambda -> None {
+                                                setVoiceInputSecondsLeft(lambda prev: int -> int {
+                                                    next_left = prev - 1;
+                                                    if next_left <= 0 {
+                                                        if voiceTickRef.id {
+                                                            clearInterval(voiceTickRef.id);
+                                                            voiceTickRef.id = None;
+                                                        }
+                                                        setShowVoiceInputUi(False);
+                                                        setMealOrderStatus("Sure! placed your usual spicy chicken bowl.");
+                                                        setShowVoiceReplay(False);
+                                                        queue_local_audio("spicy-chicken-bowl.mp3");
+                                                        setDecisions(lambda prev2: list -> list {
+                                                            return prev2.slice(-9).concat([{
+                                                                "type": "notify",
+                                                                "message": "Sure! placed your usual spicy chicken bowl.",
+                                                                "priority": 1,
+                                                                "source": "meal_order"
+                                                            }]);
+                                                        });
+                                                        setTimeout(lambda -> None {
+                                                            open_sms_invite_after_llm();
+                                                        }, 300);
+                                                        return 0;
+                                                    }
+                                                    return next_left;
+                                                });
+                                            },
+                                            1000
+                                        );
+                                    },
+                                    1200
+                                );
+                            }
+
+                            setDecisions(lambda prev: list -> list {
+                                return prev.slice(-9).concat([{
+                                    "type": "notify",
+                                    "message": "Next meal spot: " + pred.destination_name + " (" + String(pred.confidence_pct) + "%)",
+                                    "priority": 1,
+                                    "source": "meal_predictor"
+                                }]);
+                            });
+
+                            return 3;
+                        }
+                        return next_step;
+                    });
+                },
+                1000
+            );
         }
 
         def start_fall_countdown(confidence: float, accel_norm: float, gyro_norm: float, stillness_ms: int) -> None {
@@ -1950,6 +2473,10 @@ cl {
                 attachMotionListener();
                 
                 return (lambda -> None {
+                    if predictionAnimRef.current {
+                        clearInterval(predictionAnimRef.current);
+                        predictionAnimRef.current = None;
+                    }
                     stopTracking();
                 });
             },
@@ -1960,34 +2487,34 @@ cl {
         motionGyroView = None;
         if sensorData.motion {
             motionAccelView =
-                <div style={{"display": "flex", "gap": "12px"}}>
+                <div style={{"display": "flex", "gap": "16px"}}>
                     <div style={{"flex": "1"}}>
-                        <label style={{"fontSize": "12px", "color": "#888"}}>X</label>
-                        <div>{sensorData.motion.acceleration.x.toFixed(2)}</div>
+                        <label style={{"fontSize": "10px", "color": "var(--hj-text-muted)", "fontFamily": "var(--hj-font-mono)", "letterSpacing": "0.06em"}}>X</label>
+                        <div style={{"color": "var(--hj-text)", "fontFamily": "var(--hj-font-mono)", "fontSize": "14px", "fontWeight": "400", "marginTop": "2px"}}>{sensorData.motion.acceleration.x.toFixed(2)}</div>
                     </div>
                     <div style={{"flex": "1"}}>
-                        <label style={{"fontSize": "12px", "color": "#888"}}>Y</label>
-                        <div>{sensorData.motion.acceleration.y.toFixed(2)}</div>
+                        <label style={{"fontSize": "10px", "color": "var(--hj-text-muted)", "fontFamily": "var(--hj-font-mono)", "letterSpacing": "0.06em"}}>Y</label>
+                        <div style={{"color": "var(--hj-text)", "fontFamily": "var(--hj-font-mono)", "fontSize": "14px", "fontWeight": "400", "marginTop": "2px"}}>{sensorData.motion.acceleration.y.toFixed(2)}</div>
                     </div>
                     <div style={{"flex": "1"}}>
-                        <label style={{"fontSize": "12px", "color": "#888"}}>Z</label>
-                        <div>{sensorData.motion.acceleration.z.toFixed(2)}</div>
+                        <label style={{"fontSize": "10px", "color": "var(--hj-text-muted)", "fontFamily": "var(--hj-font-mono)", "letterSpacing": "0.06em"}}>Z</label>
+                        <div style={{"color": "var(--hj-text)", "fontFamily": "var(--hj-font-mono)", "fontSize": "14px", "fontWeight": "400", "marginTop": "2px"}}>{sensorData.motion.acceleration.z.toFixed(2)}</div>
                     </div>
                 </div>;
 
             motionGyroView =
-                <div style={{"display": "flex", "gap": "12px", "marginTop": "8px"}}>
+                <div style={{"display": "flex", "gap": "16px", "marginTop": "12px", "paddingTop": "12px", "borderTop": "1px solid var(--hj-border)"}}>
                     <div style={{"flex": "1"}}>
-                        <label style={{"fontSize": "12px", "color": "#888"}}>Alpha</label>
-                        <div>{sensorData.motion.rotationRate.alpha.toFixed(2)}</div>
+                        <label style={{"fontSize": "10px", "color": "var(--hj-text-muted)", "fontFamily": "var(--hj-font-mono)"}}>α</label>
+                        <div style={{"color": "var(--hj-text)", "fontFamily": "var(--hj-font-mono)", "fontSize": "14px", "fontWeight": "400", "marginTop": "2px"}}>{sensorData.motion.rotationRate.alpha.toFixed(2)}</div>
                     </div>
                     <div style={{"flex": "1"}}>
-                        <label style={{"fontSize": "12px", "color": "#888"}}>Beta</label>
-                        <div>{sensorData.motion.rotationRate.beta.toFixed(2)}</div>
+                        <label style={{"fontSize": "10px", "color": "var(--hj-text-muted)", "fontFamily": "var(--hj-font-mono)"}}>β</label>
+                        <div style={{"color": "var(--hj-text)", "fontFamily": "var(--hj-font-mono)", "fontSize": "14px", "fontWeight": "400", "marginTop": "2px"}}>{sensorData.motion.rotationRate.beta.toFixed(2)}</div>
                     </div>
                     <div style={{"flex": "1"}}>
-                        <label style={{"fontSize": "12px", "color": "#888"}}>Gamma</label>
-                        <div>{sensorData.motion.rotationRate.gamma.toFixed(2)}</div>
+                        <label style={{"fontSize": "10px", "color": "var(--hj-text-muted)", "fontFamily": "var(--hj-font-mono)"}}>γ</label>
+                        <div style={{"color": "var(--hj-text)", "fontFamily": "var(--hj-font-mono)", "fontSize": "14px", "fontWeight": "400", "marginTop": "2px"}}>{sensorData.motion.rotationRate.gamma.toFixed(2)}</div>
                     </div>
                 </div>;
         }
@@ -1995,15 +2522,15 @@ cl {
         compassView = None;
         if sensorData.compass {
             compassView =
-                <div style={{"fontSize": "12px"}}>
-                    Heading: {sensorData.compass.heading.toFixed(1)} deg
+                <div style={{"fontSize": "13px", "color": "var(--hj-text-secondary)", "fontFamily": "var(--hj-font-mono)"}}>
+                    Heading: {sensorData.compass.heading.toFixed(1)}°
                 </div>;
         }
 
         barometerView = None;
         if sensorData.barometer {
             barometerView =
-                <div style={{"display": "flex", "gap": "12px", "fontSize": "12px"}}>
+                <div style={{"display": "flex", "gap": "20px", "fontSize": "13px", "color": "var(--hj-text-secondary)", "fontFamily": "var(--hj-font-mono)"}}>
                     <div>Pressure: {sensorData.barometer.pressure.toFixed(1)}</div>
                     <div>Alt: {sensorData.barometer.relativeAltitude.toFixed(1)}m</div>
                 </div>;
@@ -2012,7 +2539,7 @@ cl {
         geoView = None;
         if sensorData.geolocation {
             geoView =
-                <div style={{"display": "grid", "gridTemplateColumns": "repeat(2, 1fr)", "gap": "8px", "fontSize": "12px"}}>
+                <div style={{"display": "grid", "gridTemplateColumns": "repeat(2, 1fr)", "gap": "10px", "fontSize": "12px", "color": "var(--hj-text-secondary)", "fontFamily": "var(--hj-font-mono)"}}>
                     <div>Lat: {sensorData.geolocation.lat.toFixed(6)}</div>
                     <div>Lng: {sensorData.geolocation.lng.toFixed(6)}</div>
                     <div>Alt: {sensorData.geolocation.alt.toFixed(1)}m</div>
@@ -2023,7 +2550,7 @@ cl {
         deviceView = None;
         if sensorData.device {
             deviceView =
-                <div style={{"fontSize": "12px", "color": "#888"}}>
+                <div style={{"fontSize": "12px", "color": "var(--hj-text-muted)", "fontFamily": "var(--hj-font-mono)"}}>
                     <div>{sensorData.device.model}</div>
                     <div>Android {sensorData.device.androidSDKVersion}</div>
                 </div>;
@@ -2032,15 +2559,15 @@ cl {
         decisionsView = None;
         if decisions.length == 0 {
             decisionsView =
-                <p style={{"fontSize": "12px", "color": "#888"}}>
+                <p style={{"fontSize": "14px", "color": "var(--hj-text-muted)", "fontStyle": "italic"}}>
                     No decisions yet
                 </p>;
         } else {
             decisionsView =
-                <div style={{"display": "grid", "gap": "8px", "fontSize": "12px"}}>
-                    <div style={{"color": "#94a3b8"}}>Total: {decisions.length}</div>
-                    <div>
-                        Last: {decisions[decisions.length - 1].message}
+                <div style={{"display": "grid", "gap": "10px", "fontSize": "13px"}}>
+                    <div style={{"color": "var(--hj-text-muted)", "fontFamily": "var(--hj-font-mono)", "fontSize": "10px", "letterSpacing": "0.04em"}}>Total: {decisions.length}</div>
+                    <div style={{"color": "var(--hj-accent)", "lineHeight": "1.6"}}>
+                        {decisions[decisions.length - 1].message}
                     </div>
                 </div>;
         }
@@ -2048,6 +2575,28 @@ cl {
         # Fall detection countdown overlay
         fallOverlay = None;
         if fallCountdown > 0 {
+            fall_lat = HARDCODED_LAT;
+            fall_lng = HARDCODED_LNG;
+            fallMapUrl = "https://www.openstreetmap.org/export/embed.html?bbox="
+                + String(fall_lng - 0.01) + "," + String(fall_lat - 0.01) + ","
+                + String(fall_lng + 0.01) + "," + String(fall_lat + 0.01)
+                + "&layer=mapnik&marker=" + String(fall_lat) + "," + String(fall_lng);
+
+            fallMapIframe = <iframe
+                src={fallMapUrl}
+                style={{
+                    "width": "100%",
+                    "maxWidth": "360px",
+                    "height": "140px",
+                    "border": "none",
+                    "borderRadius": "18px",
+                    "marginBottom": "28px",
+                    "opacity": "0.9",
+                    "animation": "hijac-fade-up 0.5s ease-out 0.2s both"
+                }}
+                loading="lazy"
+            />;
+
             fallOverlay =
                 <div style={{
                     "position": "fixed",
@@ -2055,59 +2604,86 @@ cl {
                     "left": "0",
                     "right": "0",
                     "bottom": "0",
-                    "background": "rgba(220, 38, 38, 0.95)",
+                    "background": "#FFFFFF",
                     "display": "flex",
                     "flexDirection": "column",
                     "alignItems": "center",
                     "justifyContent": "center",
                     "zIndex": "9999",
-                    "color": "#fff",
-                    "padding": "24px"
+                    "color": "var(--hj-text)",
+                    "padding": "24px",
+                    "fontFamily": "var(--hj-font-body)"
                 }}>
                     <div style={{
-                        "fontSize": "24px",
-                        "fontWeight": "700",
-                        "marginBottom": "16px",
-                        "textAlign": "center"
+                        "width": "88px",
+                        "height": "88px",
+                        "borderRadius": "50%",
+                        "border": "1.5px solid var(--hj-red-border)",
+                        "display": "flex",
+                        "alignItems": "center",
+                        "justifyContent": "center",
+                        "marginBottom": "20px",
+                        "animation": "hijac-pulse-ring 2s ease-in-out infinite",
+                        "background": "var(--hj-red-light)"
                     }}>
-                        FALL DETECTED
+                        <div style={{
+                            "fontSize": "40px",
+                            "fontWeight": "300",
+                            "color": "var(--hj-red)",
+                            "fontFamily": "var(--hj-font-display)",
+                            "animation": "hijac-countdown-pulse 1s ease-in-out infinite"
+                        }}>
+                            {fallCountdown}
+                        </div>
                     </div>
                     <div style={{
-                        "fontSize": "72px",
-                        "fontWeight": "800",
-                        "marginBottom": "24px"
+                        "fontSize": "10px",
+                        "fontWeight": "500",
+                        "marginBottom": "8px",
+                        "textAlign": "center",
+                        "letterSpacing": "0.16em",
+                        "textTransform": "uppercase",
+                        "color": "var(--hj-red)",
+                        "fontFamily": "var(--hj-font-mono)"
                     }}>
-                        {fallCountdown}
+                        Fall Detected
                     </div>
                     <div style={{
-                        "fontSize": "16px",
+                        "fontSize": "15px",
                         "marginBottom": "32px",
                         "textAlign": "center",
-                        "maxWidth": "280px"
+                        "maxWidth": "240px",
+                        "lineHeight": "1.65",
+                        "color": "var(--hj-text-secondary)"
                     }}>
-                        Emergency call will be placed in {fallCountdown} seconds
+                        Emergency call in {fallCountdown}s
                     </div>
+                    {fallMapIframe}
                     <button
                         onClick={cancel_fall_countdown}
                         style={{
-                            "padding": "16px 48px",
-                            "fontSize": "18px",
-                            "fontWeight": "700",
-                            "background": "#fff",
-                            "color": "#dc2626",
-                            "border": "none",
-                            "borderRadius": "12px",
-                            "cursor": "pointer"
+                            "padding": "14px 48px",
+                            "fontSize": "14px",
+                            "fontWeight": "500",
+                            "background": "var(--hj-red-light)",
+                            "color": "var(--hj-red)",
+                            "border": "1px solid var(--hj-red-border)",
+                            "borderRadius": "100px",
+                            "cursor": "pointer",
+                            "fontFamily": "var(--hj-font-body)",
+                            "transition": "all 0.25s cubic-bezier(0.16,1,0.3,1)"
                         }}
                     >
-                        I'M OK - CANCEL
+                        I'm OK — Cancel
                     </button>
                     <div style={{
                         "marginTop": "24px",
-                        "fontSize": "14px",
-                        "opacity": "0.8"
+                        "fontSize": "11px",
+                        "color": "var(--hj-text-muted)",
+                        "fontFamily": "var(--hj-font-mono)",
+                        "letterSpacing": "0.02em"
                     }}>
-                        Calling: {emergency_contact_name()}
+                        Calling {emergency_contact_name()}
                     </div>
                 </div>;
         }
@@ -2115,7 +2691,6 @@ cl {
         # Passcode challenge overlay (kidnap scenario)
         passcodeOverlay = None;
         if showPasscodeChallenge {
-            # Build map URL with hardcoded location
             lat = HARDCODED_LAT;
             lng = HARDCODED_LNG;
             mapUrl = "https://www.openstreetmap.org/export/embed.html?bbox="
@@ -2126,19 +2701,23 @@ cl {
             weatherInfo = None;
             if weatherData and weatherData.ok {
                 weatherInfo = <div style={{
-                    "background": "rgba(0,0,0,0.2)",
-                    "padding": "8px 12px",
-                    "borderRadius": "8px",
-                    "fontSize": "13px",
+                    "background": "var(--hj-amber-light)",
+                    "padding": "10px 16px",
+                    "borderRadius": "14px",
+                    "fontSize": "11px",
                     "display": "flex",
                     "gap": "16px",
                     "flexWrap": "wrap",
-                    "justifyContent": "center"
+                    "justifyContent": "center",
+                    "color": "var(--hj-text-secondary)",
+                    "fontFamily": "var(--hj-font-mono)",
+                    "border": "1px solid var(--hj-amber-border)",
+                    "letterSpacing": "0.02em"
                 }}>
                     <span>{weatherData.description}</span>
                     <span>{Math.round(weatherData.temp)}°C</span>
-                    <span>Humidity: {weatherData.humidity}%</span>
-                    <span>Wind: {Math.round(weatherData.wind_speed)} m/s</span>
+                    <span>{weatherData.humidity}%</span>
+                    <span>{Math.round(weatherData.wind_speed)} m/s</span>
                 </div>;
             }
             
@@ -2146,10 +2725,11 @@ cl {
                 src={mapUrl}
                 style={{
                     "width": "100%",
-                    "height": "150px",
+                    "height": "140px",
                     "border": "none",
-                    "borderRadius": "8px",
-                    "marginBottom": "12px"
+                    "borderRadius": "18px",
+                    "marginBottom": "14px",
+                    "animation": "hijac-fade-up 0.5s ease-out 0.2s both"
                 }}
                 loading="lazy"
             />;
@@ -2161,46 +2741,67 @@ cl {
                     "left": "0",
                     "right": "0",
                     "bottom": "0",
-                    "background": "rgba(234, 88, 12, 0.97)",
+                    "background": "linear-gradient(160deg, #FDF8F0 0%, #FBF7F1 35%, var(--hj-bg) 100%)",
                     "display": "flex",
                     "flexDirection": "column",
                     "alignItems": "center",
                     "justifyContent": "center",
                     "zIndex": "9999",
-                    "color": "#fff",
-                    "padding": "16px",
-                    "overflow": "auto"
+                    "color": "var(--hj-text)",
+                    "padding": "20px",
+                    "overflow": "auto",
+                    "fontFamily": "var(--hj-font-body)"
                 }}>
                     <div style={{
-                        "fontSize": "20px",
-                        "fontWeight": "700",
-                        "marginBottom": "8px",
-                        "textAlign": "center"
+                        "width": "72px",
+                        "height": "72px",
+                        "borderRadius": "50%",
+                        "border": "1.5px solid var(--hj-amber-border)",
+                        "display": "flex",
+                        "alignItems": "center",
+                        "justifyContent": "center",
+                        "marginBottom": "16px",
+                        "animation": "hijac-pulse-ring 2.5s ease-in-out infinite",
+                        "background": "var(--hj-amber-light)"
                     }}>
-                        ⚠️ SAFETY CHECK
+                        <div style={{
+                            "fontSize": "28px",
+                            "fontWeight": "300",
+                            "color": "var(--hj-amber)",
+                            "fontFamily": "var(--hj-font-display)"
+                        }}>
+                            {passcodeCountdown}
+                        </div>
                     </div>
                     <div style={{
-                        "fontSize": "14px",
-                        "marginBottom": "12px",
+                        "fontSize": "10px",
+                        "fontWeight": "500",
+                        "marginBottom": "8px",
                         "textAlign": "center",
-                        "maxWidth": "280px"
+                        "letterSpacing": "0.16em",
+                        "textTransform": "uppercase",
+                        "color": "var(--hj-amber)",
+                        "fontFamily": "var(--hj-font-mono)"
                     }}>
-                        Unusual activity detected. Enter your passcode to confirm you're OK.
+                        Safety Check
+                    </div>
+                    <div style={{
+                        "fontSize": "15px",
+                        "marginBottom": "24px",
+                        "textAlign": "center",
+                        "maxWidth": "260px",
+                        "lineHeight": "1.65",
+                        "color": "var(--hj-text-secondary)"
+                    }}>
+                        Unusual activity detected. Enter your passcode.
                     </div>
                     
                     {mapIframe}
                     {weatherInfo}
                     
-                    <div style={{
-                        "fontSize": "48px",
-                        "fontWeight": "800",
-                        "margin": "12px 0"
-                    }}>
-                        {passcodeCountdown}s
-                    </div>
                     <input
                         type="password"
-                        placeholder="Enter passcode"
+                        placeholder="Passcode"
                         value={passcodeInput}
                         onChange={lambda e: Any -> None {
                             setPasscodeInput(e.target.value);
@@ -2211,23 +2812,28 @@ cl {
                             }
                         }}
                         style={{
-                            "padding": "16px",
-                            "fontSize": "24px",
+                            "padding": "14px",
+                            "fontSize": "20px",
                             "textAlign": "center",
-                            "border": "none",
-                            "borderRadius": "12px",
+                            "border": "1px solid var(--hj-amber-border)",
+                            "borderRadius": "14px",
                             "width": "200px",
-                            "marginBottom": "12px",
-                            "background": "#fff",
-                            "color": "#000"
+                            "marginTop": "18px",
+                            "marginBottom": "14px",
+                            "background": "var(--hj-amber-light)",
+                            "color": "var(--hj-text)",
+                            "outline": "none",
+                            "fontFamily": "var(--hj-font-mono)",
+                            "letterSpacing": "0.3em",
+                            "transition": "border-color 0.25s ease"
                         }}
                         autoFocus={True}
                     />
                     {(
                         <div style={{
-                            "color": "#fef08a",
+                            "color": "var(--hj-amber)",
                             "marginBottom": "12px",
-                            "fontSize": "14px"
+                            "fontSize": "13px"
                         }}>
                             {passcodeError}
                         </div>
@@ -2235,26 +2841,30 @@ cl {
                     <button
                         onClick={lambda -> None { verify_passcode(passcodeInput); }}
                         style={{
-                            "padding": "14px 48px",
-                            "fontSize": "18px",
-                            "fontWeight": "700",
-                            "background": "#fff",
-                            "color": "#ea580c",
-                            "border": "none",
-                            "borderRadius": "12px",
+                            "padding": "12px 48px",
+                            "fontSize": "14px",
+                            "fontWeight": "500",
+                            "background": "var(--hj-amber-light)",
+                            "color": "var(--hj-amber)",
+                            "border": "1px solid var(--hj-amber-border)",
+                            "borderRadius": "100px",
                             "cursor": "pointer",
-                            "marginBottom": "8px"
+                            "marginBottom": "8px",
+                            "fontFamily": "var(--hj-font-body)",
+                            "transition": "all 0.25s cubic-bezier(0.16,1,0.3,1)"
                         }}
                     >
-                        VERIFY
+                        Verify
                     </button>
                     <div style={{
-                        "marginTop": "8px",
-                        "fontSize": "12px",
-                        "opacity": "0.8",
-                        "textAlign": "center"
+                        "marginTop": "14px",
+                        "fontSize": "11px",
+                        "color": "var(--hj-text-muted)",
+                        "textAlign": "center",
+                        "fontFamily": "var(--hj-font-mono)",
+                        "letterSpacing": "0.02em"
                     }}>
-                        Emergency call will be placed if not verified
+                        Emergency call if not verified
                     </div>
                 </div>;
         }
@@ -2269,474 +2879,554 @@ cl {
                     "left": "0",
                     "right": "0",
                     "bottom": "0",
-                    "background": "rgba(59, 130, 246, 0.95)",
+                    "background": "linear-gradient(160deg, #F0F5F4 0%, #F2F6F5 35%, var(--hj-bg) 100%)",
                     "display": "flex",
                     "flexDirection": "column",
                     "alignItems": "center",
                     "justifyContent": "center",
                     "zIndex": "9999",
-                    "color": "#fff",
-                    "padding": "24px"
+                    "color": "var(--hj-text)",
+                    "padding": "24px",
+                    "fontFamily": "var(--hj-font-body)"
                 }}>
                     <div style={{
-                        "fontSize": "20px",
-                        "fontWeight": "700",
-                        "marginBottom": "16px",
-                        "textAlign": "center"
+                        "width": "104px",
+                        "height": "104px",
+                        "borderRadius": "50%",
+                        "border": "1.5px solid var(--hj-accent-border)",
+                        "display": "flex",
+                        "alignItems": "center",
+                        "justifyContent": "center",
+                        "marginBottom": "24px",
+                        "animation": "hijac-pulse-ring 1.5s ease-in-out infinite",
+                        "background": "var(--hj-accent-light)"
                     }}>
-                        DEMO MODE
+                        <div style={{
+                            "fontSize": "48px",
+                            "fontWeight": "300",
+                            "color": "var(--hj-accent)",
+                            "fontFamily": "var(--hj-font-display)",
+                            "animation": "hijac-countdown-pulse 1s ease-in-out infinite"
+                        }}>
+                            {demoCountdown}
+                        </div>
                     </div>
                     <div style={{
-                        "fontSize": "96px",
-                        "fontWeight": "800",
-                        "marginBottom": "24px"
-                    }}>
-                        {demoCountdown}
-                    </div>
-                    <div style={{
-                        "fontSize": "16px",
-                        "marginBottom": "32px",
+                        "fontSize": "10px",
+                        "fontWeight": "500",
+                        "marginBottom": "8px",
                         "textAlign": "center",
-                        "maxWidth": "280px"
+                        "letterSpacing": "0.16em",
+                        "textTransform": "uppercase",
+                        "color": "var(--hj-accent)",
+                        "fontFamily": "var(--hj-font-mono)"
                     }}>
-                        Emergency call to {emergency_contact_name()} in {demoCountdown} seconds
+                        Demo Mode
+                    </div>
+                    <div style={{
+                        "fontSize": "15px",
+                        "marginBottom": "36px",
+                        "textAlign": "center",
+                        "maxWidth": "240px",
+                        "lineHeight": "1.65",
+                        "color": "var(--hj-text-secondary)"
+                    }}>
+                        Calling {emergency_contact_name()} in {demoCountdown}s
                     </div>
                     <button
                         onClick={cancel_demo_timer}
                         style={{
-                            "padding": "16px 48px",
-                            "fontSize": "18px",
-                            "fontWeight": "700",
-                            "background": "#fff",
-                            "color": "#3b82f6",
-                            "border": "none",
-                            "borderRadius": "12px",
-                            "cursor": "pointer"
+                            "padding": "14px 48px",
+                            "fontSize": "14px",
+                            "fontWeight": "500",
+                            "background": "var(--hj-accent-light)",
+                            "color": "var(--hj-accent)",
+                            "border": "1px solid var(--hj-accent-border)",
+                            "borderRadius": "100px",
+                            "cursor": "pointer",
+                            "fontFamily": "var(--hj-font-body)",
+                            "transition": "all 0.25s cubic-bezier(0.16,1,0.3,1)"
                         }}
                     >
-                        CANCEL
+                        Cancel
                     </button>
                     <div style={{
                         "marginTop": "24px",
-                        "fontSize": "14px",
-                        "opacity": "0.8"
+                        "fontSize": "11px",
+                        "color": "var(--hj-text-muted)",
+                        "fontFamily": "var(--hj-font-mono)",
+                        "letterSpacing": "0.02em"
                     }}>
-                        Phone: {emergency_contact()}
+                        {emergency_contact()}
                     </div>
                 </div>;
         }
 
-        statusClass = "#22c55e" if isTracking else "#888";
+        statusClass = "var(--hj-green)" if workflowCreated else "var(--hj-text-muted)";
+
+        # --- card base style ---
+        glassCard = {
+            "marginBottom": "16px",
+            "padding": "22px 24px",
+            "borderRadius": "20px",
+            "background": "var(--hj-surface)",
+            "border": "1px solid var(--hj-border)",
+            "boxShadow": "var(--hj-shadow-md)",
+            "animation": "hijac-fade-up 0.5s ease-out both"
+        };
+
+        predictionCard =
+            <div style={Object.assign({}, glassCard, {
+                "fontSize": "14px",
+                "color": "var(--hj-text-secondary)",
+                "lineHeight": "1.6"
+            })}>
+                
+            </div>;
+        if isPredictingDestination {
+            dots = "." * ((predictionLoadingStep % 3) + 1);
+            loadingText = "Predicting" + dots;
+            predictionCard =
+                <div style={Object.assign({}, glassCard, {"animation": "hijac-glow 3s ease-in-out infinite, hijac-fade-up 0.5s ease-out both"})}>
+                    <div style={{"fontSize": "9px", "color": "var(--hj-text-muted)", "marginBottom": "10px", "fontWeight": "500", "textTransform": "uppercase", "letterSpacing": "0.16em", "fontFamily": "var(--hj-font-mono)"}}>
+                        Meal Predictor
+                    </div>
+                    <div style={{"fontSize": "18px", "fontWeight": "500", "color": "var(--hj-accent)", "letterSpacing": "-0.02em", "animation": "hijac-breathe 1.5s ease-in-out infinite", "fontFamily": "var(--hj-font-display)"}}>
+                        {loadingText}
+                    </div>
+                    <div style={{"fontSize": "11px", "color": "var(--hj-text-muted)", "marginTop": "10px", "fontFamily": "var(--hj-font-mono)"}}>
+                        {predictionLoadingLocation}
+                    </div>
+                </div>;
+        } elif eatingPrediction {
+            confidenceColor = "var(--hj-green)" if eatingPrediction.confidence_pct >= 70 else ("var(--hj-amber)" if eatingPrediction.confidence_pct >= 45 else "var(--hj-red)");
+            confidenceBg = "var(--hj-green-light)" if eatingPrediction.confidence_pct >= 70 else ("var(--hj-amber-light)" if eatingPrediction.confidence_pct >= 45 else "var(--hj-red-light)");
+            orderStatusView = None;
+                            if mealOrderStatus and mealOrderStatus.trim().length > 0 {
+                                orderStatusView =
+                                    <div style={{
+                                        "fontSize": "13px",
+                                        "color": "var(--hj-accent)",
+                        "marginTop": "16px",
+                        "paddingTop": "16px",
+                                        "borderTop": "1px solid var(--hj-border)",
+                                        "lineHeight": "1.6"
+                                    }}>
+                                        {mealOrderStatus}
+                                    </div>;
+                            }
+            replayVoiceButton = None;
+            if showVoiceReplay {
+                replayVoiceButton =
+                    <button
+                        onClick={lambda -> None {
+                            unlock_audio_output();
+                            speak_assistant_prompt("do you wnat to place your usual order?");
+                        }}
+                        style={{
+                            "marginTop": "12px",
+                            "padding": "9px 20px",
+                            "fontSize": "13px",
+                            "fontWeight": "500",
+                            "borderRadius": "100px",
+                            "border": "1px solid var(--hj-accent-border)",
+                            "background": "var(--hj-accent-light)",
+                            "color": "var(--hj-accent)",
+                            "cursor": "pointer",
+                            "fontFamily": "var(--hj-font-body)",
+                            "transition": "all 0.25s cubic-bezier(0.16,1,0.3,1)"
+                        }}
+                    >
+                        Tap to hear voice prompt
+                    </button>;
+            }
+            ttsErrorView = None;
+            if lastTtsError and lastTtsError.trim().length > 0 {
+                ttsErrorView =
+                    <div style={{"fontSize": "11px", "color": "var(--hj-red)", "marginTop": "8px", "fontFamily": "var(--hj-font-mono)"}}>
+                        TTS: {lastTtsError}
+                    </div>;
+            }
+            voiceInputView = None;
+            if showVoiceInputUi {
+                listeningDots = "." * (((4 - voiceInputSecondsLeft) % 3) + 1);
+                voiceInputView =
+                    <div style={{
+                        "marginTop": "14px",
+                        "padding": "14px 16px",
+                        "borderRadius": "14px",
+                        "background": "var(--hj-accent-light)",
+                        "border": "1px solid var(--hj-accent-border)"
+                    }}>
+                        <div style={{"fontSize": "9px", "color": "var(--hj-accent)", "fontWeight": "500", "textTransform": "uppercase", "letterSpacing": "0.16em", "fontFamily": "var(--hj-font-mono)"}}>
+                            Voice Input
+                        </div>
+                        <div style={{"fontSize": "15px", "fontWeight": "500", "color": "var(--hj-accent)", "marginTop": "6px"}}>
+                            Listening{listeningDots}
+                        </div>
+                        <div style={{"fontSize": "11px", "color": "var(--hj-text-secondary)", "marginTop": "6px", "fontFamily": "var(--hj-font-mono)"}}>
+                            Heard: "Yes" ({String(voiceInputSecondsLeft)}s)
+                        </div>
+                    </div>;
+            }
+            predictionCard =
+                <div style={Object.assign({}, glassCard)}>
+                    <div style={{"fontSize": "9px", "color": "var(--hj-text-muted)", "marginBottom": "12px", "fontWeight": "500", "textTransform": "uppercase", "letterSpacing": "0.16em", "fontFamily": "var(--hj-font-mono)"}}>
+                        Next Destination
+                    </div>
+                    <div style={{"display": "flex", "justifyContent": "space-between", "gap": "16px", "alignItems": "baseline"}}>
+                        <div style={{
+                            "fontSize": "28px",
+                            "fontWeight": "400",
+                            "color": "var(--hj-text)",
+                            "letterSpacing": "-0.03em",
+                            "fontFamily": "var(--hj-font-display)",
+                            "lineHeight": "1.2"
+                        }}>
+                            {eatingPrediction.destination_name}
+                        </div>
+                        <div style={{
+                            "fontSize": "12px",
+                            "fontWeight": "500",
+                            "color": confidenceColor,
+                            "padding": "5px 12px",
+                            "background": confidenceBg,
+                            "borderRadius": "100px",
+                            "fontFamily": "var(--hj-font-mono)",
+                            "whiteSpace": "nowrap",
+                            "flexShrink": "0"
+                        }}>
+                            {String(eatingPrediction.confidence_pct)}%
+                        </div>
+                    </div>
+                    <div style={{"fontSize": "14px", "color": "var(--hj-text-secondary)", "marginTop": "10px", "lineHeight": "1.6"}}>
+                        {eatingPrediction.reason if eatingPrediction.reason else "Estimated from time/day context"}
+                    </div>
+                    <div style={{"fontSize": "10px", "color": "var(--hj-text-muted)", "marginTop": "12px", "fontFamily": "var(--hj-font-mono)", "letterSpacing": "0.02em"}}>
+                        Voice via local bundled assets
+                    </div>
+                    {ttsErrorView}
+                    {orderStatusView}
+                    {voiceInputView}
+                    {replayVoiceButton}
+                </div>;
+        }
+
+        predictionErrorView = None;
+        if eatingPredictionError {
+            predictionErrorView =
+                <div style={{
+                    "marginBottom": "16px",
+                    "padding": "14px 18px",
+                    "fontSize": "13px",
+                    "borderRadius": "14px",
+                    "background": "var(--hj-red-light)",
+                    "color": "var(--hj-red)",
+                    "borderLeft": "3px solid var(--hj-red-border)",
+                    "lineHeight": "1.6",
+                    "animation": "hijac-fade-up 0.3s ease-out both"
+                }}>
+                    {eatingPredictionError}
+                </div>;
+        }
+
+        ttsCard =
+            <div style={Object.assign({}, glassCard)}>
+                <div style={{"fontSize": "9px", "color": "var(--hj-text-muted)", "marginBottom": "14px", "fontWeight": "500", "textTransform": "uppercase", "letterSpacing": "0.16em", "fontFamily": "var(--hj-font-mono)"}}>
+                    Text-to-Speech
+                </div>
+                <textarea
+                    placeholder="Enter text to speak..."
+                    value={ttsText}
+                    onChange={lambda e: Any -> None {
+                        setTtsText(e.target.value);
+                    }}
+                    disabled={ttsLoading or ttsPlaying}
+                    style={{
+                        "width": "100%",
+                        "minHeight": "80px",
+                        "padding": "16px",
+                        "borderRadius": "14px",
+                        "border": "1px solid var(--hj-border)",
+                        "background": "var(--hj-surface-raised)",
+                        "color": "var(--hj-text)",
+                        "fontSize": "14px",
+                        "resize": "vertical",
+                        "fontFamily": "var(--hj-font-body)",
+                        "marginBottom": "14px",
+                        "boxSizing": "border-box",
+                        "outline": "none",
+                        "lineHeight": "1.7",
+                        "transition": "border-color 0.25s ease"
+                    }}
+                />
+                <div style={{"display": "flex", "gap": "10px"}}>
+                    <button
+                        onClick={play_tts}
+                        disabled={ttsLoading or ttsPlaying or not ttsText or ttsText.trim().length == 0}
+                        style={{
+                            "flex": "1",
+                            "padding": "11px 18px",
+                            "fontSize": "13px",
+                            "fontWeight": "500",
+                            "borderRadius": "100px",
+                            "border": "none",
+                            "background": "var(--hj-accent)" if not ttsLoading and not ttsPlaying else "var(--hj-surface-raised)",
+                            "color": "#FFFFFF" if not ttsLoading and not ttsPlaying else "var(--hj-text-muted)",
+                            "cursor": "pointer" if not ttsLoading and not ttsPlaying else "wait",
+                            "fontFamily": "var(--hj-font-body)",
+                            "transition": "all 0.25s cubic-bezier(0.16,1,0.3,1)"
+                        }}
+                    >
+                        {"Loading..." if ttsLoading else ("Playing..." if ttsPlaying else "Speak")}
+                    </button>
+                    <button
+                        onClick={stop_tts}
+                        disabled={not ttsPlaying}
+                        style={{
+                            "padding": "11px 18px",
+                            "fontSize": "13px",
+                            "fontWeight": "500",
+                            "borderRadius": "100px",
+                            "border": "1px solid var(--hj-border-strong)",
+                            "background": "transparent",
+                            "color": "var(--hj-text-secondary)" if ttsPlaying else "var(--hj-text-muted)",
+                            "cursor": "pointer" if ttsPlaying else "not-allowed",
+                            "fontFamily": "var(--hj-font-body)",
+                            "transition": "all 0.25s ease"
+                        }}
+                    >
+                        Stop
+                    </button>
+                </div>
+            </div>;
 
         return
             <div style={{
                 "width": "100%",
-                "padding": "16px",
+                "maxWidth": "100vw",
+                "overflowX": "hidden",
+                "padding": "0",
                 "minHeight": "100vh",
-                "background": "#0f0f0f",
-                "color": "#e0e0e0",
-                "fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif",
-                "boxSizing": "border-box"
+                "background": "var(--hj-bg)",
+                "color": "var(--hj-text)",
+                "fontFamily": "var(--hj-font-body)",
+                "boxSizing": "border-box",
+                "display": "flex",
+                "flexDirection": "column",
+                "WebkitFontSmoothing": "antialiased"
             }}>
                 <header style={{
                     "display": "flex",
                     "justifyContent": "space-between",
                     "alignItems": "center",
-                    "padding": "16px 0",
-                    "borderBottom": "1px solid #333",
-                    "marginBottom": "20px"
+                    "padding": "20px 24px",
+                    "background": "rgba(250,248,245,0.92)",
+                    "borderBottom": "1px solid var(--hj-border)",
+                    "backdropFilter": "blur(24px)",
+                    "WebkitBackdropFilter": "blur(24px)",
+                    "position": "sticky",
+                    "top": "0",
+                    "zIndex": "100",
+                    "animation": "hijac-fade-in 0.6s ease-out both"
                 }}>
-                    <h1 style={{"fontSize": "20px", "margin": "0"}}>Hijac</h1>
-                    <div style={{"display": "flex", "gap": "8px", "alignItems": "center"}}>
+                    <div style={{"display": "flex", "alignItems": "baseline", "gap": "12px"}}>
+                        <h1 style={{
+                            "fontSize": "26px",
+                            "margin": "0",
+                            "fontWeight": "500",
+                            "letterSpacing": "-0.04em",
+                            "color": "var(--hj-text)",
+                            "fontFamily": "var(--hj-font-display)",
+                            "fontStyle": "italic"
+                        }}>HiJac</h1>
+                        <div style={{
+                            "width": "6px",
+                            "height": "6px",
+                            "borderRadius": "50%",
+                            "background": "var(--hj-accent)" if workflowCreated else "var(--hj-text-muted)",
+                            "boxShadow": "0 0 10px rgba(26,92,82,0.3)" if workflowCreated else "none",
+                            "transition": "all 0.4s cubic-bezier(0.16,1,0.3,1)",
+                            "flexShrink": "0",
+                            "position": "relative",
+                            "top": "-1px"
+                        }}/>
+                    </div>
+                    <div style={{"display": "flex", "alignItems": "center", "gap": "12px"}}>
+                        <button
+                            onClick={predict_next_eating_destination}
+                            disabled={isPredictingDestination}
+                            style={{
+                                "padding": "8px 18px",
+                                "fontSize": "12px",
+                                "fontWeight": "500",
+                                "borderRadius": "100px",
+                                "border": "1px solid var(--hj-accent-border)",
+                                "background": "var(--hj-accent-light)",
+                                "color": "var(--hj-accent)",
+                                "cursor": "wait" if isPredictingDestination else "pointer",
+                                "opacity": 0.5 if isPredictingDestination else 1,
+                                "whiteSpace": "nowrap",
+                                "fontFamily": "var(--hj-font-body)",
+                                "transition": "all 0.25s cubic-bezier(0.16,1,0.3,1)",
+                                "letterSpacing": "0.01em"
+                            }}
+                        >
+                            {"Predicting..." if isPredictingDestination else "Predict Meal"}
+                        </button>
                         <span style={{
-                            "fontSize": "10px",
-                            "padding": "4px 8px",
-                            "borderRadius": "20px",
-                            "background": "#1a1a1a",
-                            "color": "#22c55e"
+                            "fontSize": "9px",
+                            "fontWeight": "500",
+                            "padding": "4px 10px",
+                            "borderRadius": "100px",
+                            "background": "var(--hj-green-light)" if workflowCreated else "var(--hj-surface-raised)",
+                            "color": "var(--hj-green)" if workflowCreated else "var(--hj-text-muted)",
+                            "fontFamily": "var(--hj-font-mono)",
+                            "letterSpacing": "0.08em",
+                            "textTransform": "uppercase",
+                            "transition": "all 0.3s ease"
                         }}>
-                            Fall Detection ON
-                        </span>
-                        <span style={{
-                            "fontSize": "12px",
-                            "padding": "4px 12px",
-                            "borderRadius": "20px",
-                            "background": "#1a1a1a",
-                            "color": statusClass
-                        }}>
-                            {"Agent Running" if isTracking else "Agent Idle"}
+                            {"Active" if workflowCreated else ""}
                         </span>
                     </div>
                 </header>
 
-                <main style={{"display": "flex", "flexDirection": "column", "gap": "16px"}}>
-                    <section style={{"background": "#1a1a1a", "borderRadius": "12px", "padding": "16px"}}>
-                        <h2 style={{"fontSize": "14px", "color": "#888", "margin": "0 0 8px 0"}}>
-                            Motion Sensors
-                        </h2>
-
+                <main style={{
+                    "flex": "1",
+                    "display": "flex",
+                    "flexDirection": "column",
+                    "justifyContent": "center",
+                    "width": "100%",
+                    "maxWidth": "560px",
+                    "margin": "0 auto",
+                    "padding": "32px 24px 48px 24px"
+                }}>
+                    {predictionErrorView}
+                    {predictionCard}
+                    {(
+                        <div style={{
+                            "textAlign": "center",
+                            "padding": "0 24px",
+                            "animation": "hijac-fade-up 0.4s ease-out both"
+                        }}>
+                            <div style={{
+                                "width": "44px",
+                                "height": "44px",
+                                "margin": "0 auto 24px auto",
+                                "borderRadius": "50%",
+                                "border": "2px solid var(--hj-accent-border)",
+                                "borderTopColor": "var(--hj-accent)",
+                                "animation": "hijac-spin 0.9s linear infinite"
+                            }} />
+                            <p style={{
+                                "fontSize": "14px",
+                                "color": "var(--hj-text-secondary)",
+                                "margin": "0",
+                                "fontWeight": "400",
+                                "fontFamily": "var(--hj-font-body)",
+                                "letterSpacing": "0.01em"
+                            }}>
+                                Creating workflow...
+                            </p>
+                        </div>
+                    ) if isCreatingWorkflow else (
                         <div style={{
                             "display": "flex",
-                            "gap": "8px",
-                            "marginBottom": "12px",
-                            "fontSize": "11px",
-                            "flexWrap": "wrap"
+                            "flexDirection": "column",
+                            "alignItems": "center",
+                            "animation": "hijac-fade-up 0.5s ease-out 0.1s both"
                         }}>
-                            <span style={{"color": "#4ade80"}}>Accel</span>
-                            <span style={{"color": "#4ade80"}}>Gyro</span>
-                            <span style={{"color": ("#4ade80" if capabilities and capabilities.compass else "#ef4444")}}>
-                                Compass
-                            </span>
-                            <span style={{"color": ("#4ade80" if capabilities and capabilities.barometer else "#ef4444")}}>
-                                Baro
-                            </span>
-                            <span style={{"color": ("#4ade80" if capabilities and capabilities.geolocation else "#ef4444")}}>
-                                GPS
-                            </span>
-                            <span style={{"color": "#4ade80"}}>Prox</span>
-                            <span style={{"color": "#4ade80"}}>Mic</span>
-                        </div>
+                            <div style={{
+                                "textAlign": "center",
+                                "marginBottom": "32px"
+                            }}>
+                                <h2 style={{
+                                    "fontSize": "36px",
+                                    "color": "var(--hj-text)",
+                                    "margin": "0 0 12px 0",
+                                    "fontWeight": "400",
+                                    "letterSpacing": "-0.03em",
+                                    "fontFamily": "var(--hj-font-display)"
+                                }}>
+                                    Create Workflow
+                                </h2>
+                                <p style={{
+                                    "fontSize": "15px",
+                                    "color": "var(--hj-text-secondary)",
+                                    "margin": "0",
+                                    "lineHeight": "1.6"
+                                }}>
+                                    Describe what you want to monitor.
+                                </p>
+                            </div>
 
-                        <label style={{"fontSize": "11px", "color": "#888", "display": "block", "marginBottom": "8px"}}>
-                            Accelerometer (m/s2)
-                        </label>
-                        {motionAccelView}
-
-                        <label style={{"fontSize": "11px", "color": "#888", "display": "block", "margin": "12px 0 8px 0"}}>
-                            Gyroscope (deg/s)
-                        </label>
-                        {motionGyroView}
-
-                        <label style={{"fontSize": "11px", "color": "#888", "display": "block", "margin": "12px 0 8px 0"}}>
-                            Compass (degrees)
-                        </label>
-                        {compassView}
-
-                        <label style={{"fontSize": "11px", "color": "#888", "display": "block", "margin": "12px 0 8px 0"}}>
-                            Barometer (hPa)
-                        </label>
-                        {barometerView}
-
-                        <label style={{"fontSize": "11px", "color": "#888", "display": "block", "margin": "12px 0 8px 0"}}>
-                            Geolocation
-                        </label>
-                        {geoView}
-
-                        <label style={{"fontSize": "11px", "color": "#888", "display": "block", "margin": "12px 0 8px 0"}}>
-                            Microphone
-                        </label>
-                        <button
-                            onClick={handleMicToggle}
-                            style={{
+                            <div style={{
                                 "width": "100%",
-                                "padding": "10px",
-                                "border": "none",
-                                "borderRadius": "8px",
-                                "fontSize": "14px",
-                                "fontWeight": "500",
-                                "background": "#8b5cf6",
-                                "color": "#fff",
-                                "cursor": "pointer"
-                            }}
-                        >
-                            {("Stop Recording" if isRecording else "Start Recording")}
-                        </button>
-
-                        <label style={{"fontSize": "11px", "color": "#888", "display": "block", "margin": "12px 0 8px 0"}}>
-                            Device
-                        </label>
-                        {deviceView}
-
-                        <button
-                            onClick={handleTakePhoto}
-                            style={{
-                                "width": "100%",
-                                "padding": "12px",
-                                "marginTop": "12px",
-                                "border": "none",
-                                "borderRadius": "8px",
-                                "fontSize": "14px",
-                                "fontWeight": "600",
-                                "background": "#3b82f6",
-                                "color": "#fff",
-                                "cursor": "pointer"
-                            }}
-                        >
-                            {("Photo Taken!" if lastPhoto else "Take Photo")}
-                        </button>
-                        {( 
-                            <p style={{"fontSize": "11px", "color": "#4ade80", "textAlign": "center", "marginTop": "8px"}}>
-                                Photo saved
-                            </p>
-                        ) if lastPhoto else None}
-                    </section>
-
-                    <section style={{"background": "#1a1a1a", "borderRadius": "12px", "padding": "16px"}}>
-                        <h2 style={{"fontSize": "14px", "color": "#888", "margin": "0 0 8px 0"}}>
-                            AI Agent
-                        </h2>
-                        <div style={{"display": "flex", "gap": "16px", "fontSize": "12px", "color": "#888", "marginBottom": "12px"}}>
-                            <span>Decisions: {decisions.length}</span>
-                            <span>Running: {("Yes" if agentRunning else "No")}</span>
-                        </div>
-
-                        {(
-                            <button
-                                onClick={startTracking}
-                                style={{
-                                    "width": "100%",
-                                    "padding": "12px",
-                                    "border": "none",
-                                    "borderRadius": "8px",
-                                    "fontSize": "14px",
-                                    "fontWeight": "600",
-                                    "cursor": "pointer",
-                                    "background": "#4ade80",
-                                    "color": "#000"
-                                }}
-                            >
-                                Start Agent
-                            </button>
-                        ) if not isTracking else (
-                            <button
-                                onClick={stopTracking}
-                                style={{
-                                    "width": "100%",
-                                    "padding": "12px",
-                                    "border": "none",
-                                    "borderRadius": "8px",
-                                    "fontSize": "14px",
-                                    "fontWeight": "600",
-                                    "cursor": "pointer",
-                                    "background": "#ef4444",
-                                    "color": "#fff"
-                                }}
-                            >
-                                Stop Agent
-                            </button>
-                        )}
-
-                        <button
-                            onClick={simulate_sensor_event}
-                            style={{
-                                "width": "100%",
-                                "padding": "10px",
-                                "marginTop": "10px",
-                                "border": "none",
-                                "borderRadius": "8px",
-                                "fontSize": "13px",
-                                "fontWeight": "600",
-                                "cursor": "pointer",
-                                "background": "#f59e0b",
-                                "color": "#111"
-                            }}
-                        >
-                            Simulate Sensor Event
-                        </button>
-                        
-                        <button
-                            onClick={simulate_fall}
-                            style={{
-                                "width": "100%",
-                                "padding": "10px",
-                                "marginTop": "10px",
-                                "border": "none",
-                                "borderRadius": "8px",
-                                "fontSize": "13px",
-                                "fontWeight": "600",
-                                "cursor": "pointer",
-                                "background": "#dc2626",
-                                "color": "#fff"
-                            }}
-                        >
-                            Simulate Fall
-                        </button>
-                    </section>
-
-                    <section style={{"background": "#1a1a1a", "borderRadius": "12px", "padding": "16px"}}>
-                        <h2 style={{"fontSize": "14px", "color": "#888", "margin": "0 0 12px 0"}}>
-                            Rules Manager (IF/THEN)
-                        </h2>
-
-                        <input
-                            placeholder="Rule name"
-                            value={ruleDraft.name}
-                            onChange={lambda e: Any -> None {
-                                setRuleDraft(lambda prev: Any -> Any {
-                                    next_draft = Object.assign({}, prev);
-                                    next_draft.name = e.target.value;
-                                    return next_draft;
-                                });
-                            }}
-                            style={{
-                                "width": "100%",
-                                "padding": "8px",
-                                "borderRadius": "8px",
-                                "border": "1px solid #333",
-                                "background": "#111",
-                                "color": "#e0e0e0",
-                                "marginBottom": "8px"
-                            }}
-                        />
-
-                        <div style={{"display": "grid", "gridTemplateColumns": "1fr 90px", "gap": "8px", "marginBottom": "8px"}}>
-                            <select
-                                value={ruleDraft.conditionType}
-                                onChange={lambda e: Any -> None {
-                                    setRuleDraft(lambda prev: Any -> Any {
-                                        next_draft = Object.assign({}, prev);
-                                        next_draft.conditionType = e.target.value;
-                                        return next_draft;
-                                    });
-                                }}
-                                style={{
-                                    "padding": "8px",
-                                    "borderRadius": "8px",
-                                    "border": "1px solid #333",
-                                    "background": "#111",
-                                    "color": "#e0e0e0"
-                                }}
-                            >
-                                <option value="motion_intensity_gt">IF motion &gt;</option>
-                                <option value="speed_gt">IF speed &gt;</option>
-                            </select>
-                            <input
-                                value={ruleDraft.conditionValue}
-                                onChange={lambda e: Any -> None {
-                                    setRuleDraft(lambda prev: Any -> Any {
-                                        next_draft = Object.assign({}, prev);
-                                        next_draft.conditionValue = e.target.value;
-                                        return next_draft;
-                                    });
-                                }}
-                                style={{
-                                    "padding": "8px",
-                                    "borderRadius": "8px",
-                                    "border": "1px solid #333",
-                                    "background": "#111",
-                                    "color": "#e0e0e0"
-                                }}
-                            />
-                        </div>
-
-                        <div style={{"display": "grid", "gridTemplateColumns": "1fr", "gap": "8px", "marginBottom": "8px"}}>
-                            <select
-                                value={ruleDraft.actionType}
-                                onChange={lambda e: Any -> None {
-                                    setRuleDraft(lambda prev: Any -> Any {
-                                        next_draft = Object.assign({}, prev);
-                                        next_draft.actionType = e.target.value;
-                                        return next_draft;
-                                    });
-                                }}
-                                style={{
-                                    "padding": "8px",
-                                    "borderRadius": "8px",
-                                    "border": "1px solid #333",
-                                    "background": "#111",
-                                    "color": "#e0e0e0"
-                                }}
-                            >
-                                <option value="notify">THEN notify</option>
-                                <option value="maps_home">THEN open maps</option>
-                                <option value="webhook">THEN send webhook</option>
-                            </select>
-                            <input
-                                placeholder="Action value (message, destination, or webhook URL)"
-                                value={ruleDraft.actionValue}
-                                onChange={lambda e: Any -> None {
-                                    setRuleDraft(lambda prev: Any -> Any {
-                                        next_draft = Object.assign({}, prev);
-                                        next_draft.actionValue = e.target.value;
-                                        return next_draft;
-                                    });
-                                }}
-                                style={{
-                                    "padding": "8px",
-                                    "borderRadius": "8px",
-                                    "border": "1px solid #333",
-                                    "background": "#111",
-                                    "color": "#e0e0e0"
-                                }}
-                            />
-                        </div>
-
-                        <button
-                            onClick={add_rule}
-                            style={{
-                                "width": "100%",
-                                "padding": "10px",
-                                "border": "none",
-                                "borderRadius": "8px",
-                                "fontWeight": "600",
-                                "background": "#22c55e",
-                                "color": "#111",
-                                "marginBottom": "12px"
-                            }}
-                        >
-                            Add Rule
-                        </button>
-
-                        <div style={{"display": "grid", "gap": "8px"}}>
-                            {rules.map(lambda rule: Any -> JsxElement {
-                                return <div
-                                    key={rule.id}
-                                    style={{
-                                        "border": "1px solid #2a2a2a",
-                                        "borderRadius": "8px",
-                                        "padding": "10px",
-                                        "fontSize": "12px"
+                                "borderRadius": "20px",
+                                "border": "2px solid var(--hj-border-strong)",
+                                "background": "var(--hj-surface)",
+                                "overflow": "hidden",
+                                "display": "flex",
+                                "flexDirection": "column",
+                                "boxShadow": "var(--hj-shadow-lg)",
+                                "transition": "border-color 0.3s ease, box-shadow 0.3s ease",
+                                "animation": "hijac-fade-up 0.5s ease-out 0.2s both"
+                            }}>
+                                <textarea
+                                    placeholder="e.g. Monitor for falls and alert emergency contacts"
+                                    value={workflowPrompt}
+                                    onChange={lambda e: Any -> None {
+                                        setWorkflowPrompt(e.target.value);
                                     }}
-                                >
-                                    <div style={{"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "8px"}}>
-                                        <strong style={{"color": "#e2e8f0"}}>{rule.name}</strong>
-                                        <span style={{"color": ("#4ade80" if rule.enabled else "#ef4444")}}>
-                                            {("Enabled" if rule.enabled else "Disabled")}
-                                        </span>
-                                    </div>
-                                    <div style={{"marginTop": "4px", "color": "#94a3b8"}}>
-                                        IF {rule.condition.type} {String(rule.condition.value)} THEN {rule.action.type}
-                                    </div>
-                                    <div style={{"marginTop": "4px", "color": "#cbd5e1"}}>{rule.action.value}</div>
-                                    <div style={{"display": "flex", "gap": "8px", "marginTop": "8px"}}>
-                                        <button
-                                            onClick={lambda -> None { toggle_rule(rule.id); }}
-                                            style={{
-                                                "flex": "1",
-                                                "padding": "8px",
-                                                "border": "none",
-                                                "borderRadius": "6px",
-                                                "background": ("#f59e0b" if rule.enabled else "#22c55e"),
-                                                "color": "#111"
-                                            }}
-                                        >
-                                            {("Disable" if rule.enabled else "Enable")}
-                                        </button>
-                                        <button
-                                            onClick={lambda -> None { remove_rule(rule.id); }}
-                                            style={{
-                                                "flex": "1",
-                                                "padding": "8px",
-                                                "border": "none",
-                                                "borderRadius": "6px",
-                                                "background": "#ef4444",
-                                                "color": "#fff"
-                                            }}
-                                        >
-                                            Delete
-                                        </button>
-                                    </div>
-                                </div>;
-                            })}
+                                    style={{
+                                        "minHeight": "140px",
+                                        "padding": "20px 22px",
+                                        "border": "2px solid #78716C",
+                                        "borderRadius": "12px",
+                                        "margin": "16px",
+                                        "background": "#FFFFFF",
+                                        "color": "#1C1917",
+                                        "fontSize": "15px",
+                                        "lineHeight": "1.75",
+                                        "resize": "none",
+                                        "fontFamily": "var(--hj-font-body)",
+                                        "outline": "none",
+                                        "width": "calc(100% - 32px)",
+                                        "boxSizing": "border-box",
+                                        "fontWeight": "400"
+                                    }}
+                                />
+                                <div style={{
+                                    "padding": "16px 20px",
+                                    "borderTop": "1px solid #E5E5E5",
+                                    "display": "flex",
+                                    "justifyContent": "flex-end",
+                                    "alignItems": "center",
+                                    "background": "#F5F2EE"
+                                }}>
+                                    <button
+                                        onClick={create_workflow}
+                                        style={{
+                                            "padding": "14px 32px",
+                                            "border": "none",
+                                            "borderRadius": "12px",
+                                            "fontSize": "16px",
+                                            "fontWeight": "600",
+                                            "cursor": "pointer",
+                                            "background": "#1A5C52",
+                                            "color": "#FFFFFF",
+                                            "fontFamily": "var(--hj-font-body)",
+                                            "transition": "all 0.25s cubic-bezier(0.16,1,0.3,1)",
+                                            "letterSpacing": "0.01em",
+                                            "boxShadow": "0 4px 12px rgba(26,92,82,0.3)"
+                                        }}
+                                    >
+                                        Submit
+                                    </button>
+                                </div>
+                            </div>
                         </div>
-                    </section>
-
-                    <section style={{"background": "#1a1a1a", "borderRadius": "12px", "padding": "16px"}}>
-                        <h2 style={{"fontSize": "14px", "color": "#888", "margin": "0 0 12px 0"}}>
-                            Recent Decisions
-                        </h2>
-                        {decisionsView}
-                    </section>
+                    )}
                 </main>
                 {fallOverlay}
                 {passcodeOverlay}
