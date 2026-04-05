@@ -165,21 +165,35 @@ Backboard.ai serves as the persistent memory layer for Hijac's agent, solving th
 * In `hj { }` blocks, create API wrapper functions:
   ```jac
   hj {
-      def write_observation(user_id: str, observation: str) -> void {
-          fetch("https://api.backboard.ai/memory/write", {
+      def write_observation(assistant_id: str, user_id: str, namespace: str, observation: str) -> void {
+          fetch(f"https://app.backboard.io/api/assistants/{assistant_id}/memories", {
               method: "POST",
-              headers: {"Authorization": f"Bearer {BACKBOARD_KEY}"},
-              body: {user_id, observation}
+              headers: {
+                  "X-API-Key": BACKBOARD_KEY,
+                  "Content-Type": "application/json"
+              },
+              body: {
+                  content: f"[{namespace}] {observation}",
+                  metadata: {namespace, user_id}
+              }
           });
       }
-      
-      def read_context(user_id: str) -> dict {
-          resp = fetch(f"https://api.backboard.ai/memory/read/{user_id}");
+
+      def read_context(assistant_id: str, user_id: str, query: str) -> dict {
+          resp = fetch(f"https://app.backboard.io/api/assistants/{assistant_id}/memories/search", {
+              method: "POST",
+              headers: {
+                  "X-API-Key": BACKBOARD_KEY,
+                  "Content-Type": "application/json"
+              },
+              body: {query: f"user:{user_id} {query}", limit: 5}
+          });
           return resp.json();
       }
   }
   ```
 * Utilize Backboard's **Memory Engine** to automatically extract and persist facts.
+* For cross-thread memory extraction/retrieval during inference, call `POST /threads/{thread_id}/messages` with `memory: "Auto"` (or `"Readonly"` for read-only recall).
 * Before taking action, walkers retrieve historical context from Backboard.ai.
 * If pattern confidence > threshold → walker acts autonomously; otherwise, suggests and asks.
 
@@ -273,8 +287,8 @@ Backboard.ai serves as the persistent memory layer for Hijac's agent, solving th
       def insforge_query(table: str, filters: dict) -> list { ... }
       
       # Backboard
-      def backboard_write(user_id: str, obs: str) -> void { ... }
-      def backboard_read(user_id: str) -> dict { ... }
+      def backboard_write(assistant_id: str, user_id: str, namespace: str, obs: str) -> void { ... }
+      def backboard_read(assistant_id: str, user_id: str, query: str) -> dict { ... }
   }
   ```
 
@@ -299,7 +313,7 @@ Backboard.ai serves as the persistent memory layer for Hijac's agent, solving th
       # When visiting a LocationNode
       can analyze_location with LocationNode entry {
           # Get context from Backboard.ai
-          context = backboard_read(user_id);
+          context = backboard_read(assistant_id, user_id, "ritual_patterns geofence_patterns conversation_commitments");
           
           # Use by llm() for AI reasoning
           decision = by llm() -> str {
@@ -330,8 +344,9 @@ Backboard.ai serves as the persistent memory layer for Hijac's agent, solving th
   ```
 
 **Task 3.4 — Agent memory loop**
-* Before reasoning, walkers call `backboard_read()` to get historical patterns.
-* After events, walkers call `backboard_write()` to record new patterns.
+* Before reasoning, walkers call `backboard_read(assistant_id, user_id, query)` to get historical patterns.
+* After events, walkers call `backboard_write(assistant_id, user_id, namespace, obs)` to record new patterns.
+* For agent turn memory extraction and retrieval, call `POST /threads/{thread_id}/messages` with `memory: "Auto"` (or `"Readonly"` for retrieval-only).
 * Use `by llm()` to evaluate confidence based on Backboard.ai context.
 * Log all events to InsForge via `insforge_insert()`.
 
@@ -525,20 +540,31 @@ node TimeNode {
 # Mobile app code (compiles to JS + Capacitor)
 hj {
     # API wrappers - call external services directly
-    def read_context(user_id: str) -> dict {
-        resp = fetch(f"https://api.backboard.ai/memory/read/{user_id}", {
-            headers: {"Authorization": f"Bearer {BACKBOARD_KEY}"}
+    def read_context(assistant_id: str, user_id: str, query: str) -> dict {
+        resp = fetch(f"https://app.backboard.io/api/assistants/{assistant_id}/memories/search", {
+            method: "POST",
+            headers: {
+                "X-API-Key": BACKBOARD_KEY,
+                "Content-Type": "application/json"
+            },
+            body: {query: f"user:{user_id} {query}", limit: 5}
         });
         return resp.json();
     }
-    
-    def write_observation(user_id: str, obs: str) -> void {
-        fetch("https://api.backboard.ai/memory/write", {
+
+    def write_observation(assistant_id: str, user_id: str, namespace: str, obs: str) -> void {
+        fetch(f"https://app.backboard.io/api/assistants/{assistant_id}/memories", {
             method: "POST",
-            headers: {"Authorization": f"Bearer {BACKBOARD_KEY}"},
-            body: {user_id, observation: obs}
+            headers: {
+                "X-API-Key": BACKBOARD_KEY,
+                "Content-Type": "application/json"
+            },
+            body: {
+                content: f"[{namespace}] {obs}",
+                metadata: {namespace, user_id}
+            }
         });
-        
+
         # Also log to InsForge
         insforge_insert('sensor_events', {user_id, observation: obs});
     }
@@ -593,7 +619,7 @@ walker HijacAgent {
     # Analyze location context
     can analyze with LocationNode entry {
         # Get historical context from Backboard.ai
-        context = read_context(user_id);
+        context = read_context(assistant_id, user_id, "ritual_patterns geofence_patterns conversation_commitments");
         
         # Use by llm() for AI reasoning
         should_act: bool = by llm(
@@ -612,7 +638,7 @@ walker HijacAgent {
         }
         
         # Record observation
-        write_observation(user_id, f"User at {here.lat}, {here.lng}");
+        write_observation(assistant_id, user_id, "ritual_patterns", f"User at {here.lat}, {here.lng}");
         
         visit [-->];
     }
