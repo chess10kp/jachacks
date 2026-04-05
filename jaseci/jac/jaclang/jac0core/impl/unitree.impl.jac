@@ -190,7 +190,7 @@ impl UniNode.parent_of_type(typ: type[T]) -> T {
 
         This covers:
         - Nodes inside an explicit cl {} block in a .jac file
-        - Nodes inside a function marked with CLIENT context in .cl.jac files
+        - Nodes inside a function marked with CLIENT context in .cl.jac/.hj.jac files
         - Overridden by sv {} blocks (server takes precedence)
 
         Uses single traversal for efficiency since this is called frequently.
@@ -1082,7 +1082,7 @@ impl Import.is_jac -> bool {
 @property
 impl Import.__jac_detected -> bool {
     if self.from_loc {
-        if self.from_loc.resolve_relative_path().endswith(('.jac', '.cl.jac')) {
+        if self.from_loc.resolve_relative_path().endswith(('.jac', '.cl.jac', '.hj.jac')) {
             return True;
         }
         if os.path.isdir(self.from_loc.resolve_relative_path()) {
@@ -1096,11 +1096,16 @@ impl Import.__jac_detected -> bool {
             ) {
                 return True;
             }
+            if os.path.exists(
+                os.path.join(self.from_loc.resolve_relative_path(), '__init__.hj.jac')
+            ) {
+                return True;
+            }
             for i in self.items {
                 if (
                     isinstance(i, ModuleItem)
                     and self.from_loc.resolve_relative_path(i.name.value).endswith(
-                        ('.jac', '.cl.jac')
+                        ('.jac', '.cl.jac', '.hj.jac')
                     )
                 ) {
                     return True;
@@ -1111,7 +1116,7 @@ impl Import.__jac_detected -> bool {
     return `any(
         (
             isinstance(i, ModulePath)
-            and i.resolve_relative_path().endswith(('.jac', '.cl.jac'))
+            and i.resolve_relative_path().endswith(('.jac', '.cl.jac', '.hj.jac'))
         ) for i in self.items
     );
 }
@@ -1155,7 +1160,7 @@ impl ModulePath.resolve_relative_path(target_item: (str | None) = None) -> str {
         if (module_name in module_map) {
             return os.path.join(runtime_dir, module_map[module_name]);
         }
-        for ext in ['.cl.jac', '.jac', '.js'] {
+        for ext in ['.cl.jac', '.hj.jac', '.jac', '.js'] {
             path = os.path.join(runtime_dir, (module_name + ext));
             if os.path.exists(path) {
                 return path;

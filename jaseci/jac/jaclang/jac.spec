@@ -239,6 +239,7 @@ jsx_child ::= JSX_TEXT jsx_child? | "{" expression "}" | jsx_element
 element_stmt ::=
     ";"
     | "cl" (client_block | element_stmt)?
+    | "hj" (client_block | element_stmt)?
     | "sv" (server_block | element_stmt)?
     | "na" (native_block | element_stmt)?
     | type_alias
@@ -264,7 +265,7 @@ docstring_target ::=
         | module_code
     )?
 
-client_block ::= "cl" ("{" element_stmt* "}" | element_stmt)
+client_block ::= ("cl" | "hj") ("{" element_stmt* "}" | element_stmt)
 
 server_block ::= "sv" ("{" element_stmt* "}" | element_stmt)
 

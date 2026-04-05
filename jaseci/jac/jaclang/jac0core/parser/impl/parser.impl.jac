@@ -3365,7 +3365,7 @@ impl Parser.parse_element_stmt{
     if self.at_end() {
         return None;
     }
-    # Handle client/server/native context blocks: cl { ... } or cl stmt
+    # Handle client/server/native context blocks: cl/hj { ... } or cl/hj stmt
     if self.check(TokenKind.KW_CLIENT) {
         if self.check_peek(TokenKind.LBRACE) {
             return self.parse_client_block();
@@ -3630,7 +3630,7 @@ impl Parser.parse_docstring_target{
     return result;
 }
 
-"""Parse client block: cl { stmts } or cl stmt"""
+"""Parse client block: cl/hj { stmts } or cl/hj stmt"""
 impl Parser.parse_client_block -> ClientBlock {
     cl_tok = self.consume_uni(TokenKind.KW_CLIENT);
     kid: list = [cl_tok];

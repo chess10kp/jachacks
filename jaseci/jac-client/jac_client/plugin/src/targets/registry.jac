@@ -12,6 +12,7 @@ enum TargetType {
     DESKTOP = "desktop",
     PWA = "pwa",
     MOBILE = "mobile",
+    HJ = "hj",
     WATCH = "watch"
 }
 
@@ -29,6 +30,9 @@ def get_target_type(name: str) -> TargetType {
     }
     if name_lower == "mobile" {
         return TargetType.MOBILE;
+    }
+    if name_lower == "hj" {
+        return TargetType.HJ;
     }
     if name_lower == "watch" {
         return TargetType.WATCH;

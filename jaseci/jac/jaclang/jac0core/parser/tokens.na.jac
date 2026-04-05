@@ -344,6 +344,7 @@ glob KEYWORDS: dict[str, TokenKind] = {
          "protect": TokenKind.KW_PROT,
          # Context keywords
          "cl": TokenKind.KW_CLIENT,
+         "hj": TokenKind.KW_CLIENT,
          "sv": TokenKind.KW_SERVER,
          "na": TokenKind.KW_NATIVE,
          # Special keywords

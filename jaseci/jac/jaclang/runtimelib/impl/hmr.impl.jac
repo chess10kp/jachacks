@@ -255,6 +255,8 @@ impl HotReloader._get_js_filename(file_path: str) -> str {
     # Handle different Jac file extensions
     if name.endswith(".cl.jac") {
         return name[:-7] + ".js";
+    } elif name.endswith(".hj.jac") {
+        return name[:-7] + ".js";
     } elif name.endswith(".impl.jac") {
         return name[:-9] + ".js";
     } elif name.endswith(".jac") {
@@ -331,6 +333,8 @@ impl HotReloader._path_to_module(file_path: str) -> str {
         if part.endswith(".impl.jac") {
             module_parts.append(part[:-9]);
         } elif part.endswith(".cl.jac") {
+            module_parts.append(part[:-7]);
+        } elif part.endswith(".hj.jac") {
             module_parts.append(part[:-7]);
         } elif part.endswith(".sv.jac") {
             module_parts.append(part[:-7]);

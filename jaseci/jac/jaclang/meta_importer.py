@@ -266,6 +266,14 @@ class JacMetaImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
                         loader=self,
                         submodule_search_locations=[candidate_path],
                     )
+                init_hj_file = os.path.join(candidate_path, "__init__.hj.jac")
+                if os.path.isfile(init_hj_file):
+                    return importlib.util.spec_from_file_location(
+                        fullname,
+                        init_hj_file,
+                        loader=self,
+                        submodule_search_locations=[candidate_path],
+                    )
                 # No __init__.jac found — treat as Jac namespace package if
                 # the directory contains .jac files but no __init__.py
                 # (which would make it a regular Python package).  Without
@@ -274,7 +282,10 @@ class JacMetaImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
                 # happens to be on sys.path at that moment.
                 if not os.path.isfile(
                     os.path.join(candidate_path, "__init__.py")
-                ) and any(f.endswith(".jac") for f in os.listdir(candidate_path)):
+                ) and any(
+                    f.endswith((".jac", ".cl.jac", ".hj.jac", ".sv.jac", ".na.jac"))
+                    for f in os.listdir(candidate_path)
+                ):
                     spec = importlib.machinery.ModuleSpec(
                         fullname, loader=None, is_package=True
                     )
@@ -297,6 +308,18 @@ class JacMetaImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             if os.path.isfile(cl_jac_file):
                 return importlib.util.spec_from_file_location(
                     fullname, cl_jac_file, loader=self
+                )
+            # Check for .hj.jac file (client-side hijac)
+            hj_jac_file = candidate_path + ".hj.jac"
+            if os.path.isfile(hj_jac_file):
+                return importlib.util.spec_from_file_location(
+                    fullname, hj_jac_file, loader=self
+                )
+            # Check for .hj.jac file (hijac client-side)
+            hj_jac_file = candidate_path + ".hj.jac"
+            if os.path.isfile(hj_jac_file):
+                return importlib.util.spec_from_file_location(
+                    fullname, hj_jac_file, loader=self
                 )
             # Check for .na.jac file (native)
             na_jac_file = candidate_path + ".na.jac"
@@ -437,6 +460,12 @@ class JacMetaImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
                         full_target=init_cl_file,
                         target_program=program,
                     )
+                init_hj_file = os.path.join(candidate_path, "__init__.hj.jac")
+                if os.path.isfile(init_hj_file):
+                    return compiler.get_bytecode(
+                        full_target=init_hj_file,
+                        target_program=program,
+                    )
             # Check for .jac file
             jac_file = candidate_path + ".jac"
             if os.path.isfile(jac_file):
@@ -448,6 +477,12 @@ class JacMetaImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             if os.path.isfile(cl_jac_file):
                 return compiler.get_bytecode(
                     full_target=cl_jac_file,
+                    target_program=program,
+                )
+            hj_jac_file = candidate_path + ".hj.jac"
+            if os.path.isfile(hj_jac_file):
+                return compiler.get_bytecode(
+                    full_target=hj_jac_file,
                     target_program=program,
                 )
 

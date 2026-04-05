@@ -41,8 +41,8 @@ with entry {
             "client",
             typ=str,
             default="web",
-            help="Build client (web, desktop, pwa, mobile, watch)",
-            choices=["web", "desktop", "pwa", "mobile", "watch"],
+            help="Build client (web, desktop, pwa, mobile, hj, watch)",
+            choices=["web", "desktop", "pwa", "mobile", "hj", "watch"],
             short=""  # Disable auto-generated -t (may conflict with other plugins)
         ),
         Arg.create(
@@ -61,6 +61,7 @@ with entry {
         ("jac build --client pwa", "Build PWA (Progressive Web App)"),
         ("jac build --client desktop", "Build desktop app"),
         ("jac build --client mobile --platform android", "Build Android mobile app"),
+        ("jac build --client hj --platform android", "Build Hijac app (Capacitor)"),
         ("jac build --client desktop --platform windows", "Build for Windows"),
 
     ],
@@ -169,8 +170,8 @@ class JacCmd {
                         "client",  # Use client to avoid conflict with jac-scale's --client
                         typ=str,
                         default="web",
-                        help="Client build target for dev server (web, desktop, pwa, mobile, watch)",
-                        choices=["web", "desktop", "pwa", "mobile", "watch"],
+                        help="Client build target for dev server (web, desktop, pwa, mobile, hj, watch)",
+                        choices=["web", "desktop", "pwa", "mobile", "hj", "watch"],
                         short=""  # Disable auto-generated short flag
                     ),
 
@@ -456,14 +457,36 @@ def _handle_start_target(ctx: HookContext) -> None {
     if target_name != "web" {
         # Check if target requires setup
         if target.requires_setup {
-            tauri_dir = project_dir / "src-tauri";
-            if not tauri_dir.exists() {
-                console.error(
-                    f"Target '{target_name}' not set up. Run 'jac setup {target_name}' first."
-                );
-                ctx.set_data("cancel_execution", True);
-                ctx.set_data("cancel_return_code", 1);
-                return;
+            if target_name in ["desktop", "mobile"] {
+                tauri_dir = project_dir / "src-tauri";
+                if not tauri_dir.exists() {
+                    console.error(
+                        f"Target '{target_name}' not set up. Run 'jac setup {target_name}' first."
+                    );
+                    ctx.set_data("cancel_execution", True);
+                    ctx.set_data("cancel_return_code", 1);
+                    return;
+                }
+            } elif target_name == "hj" {
+                android_dir = project_dir / "android";
+                if not android_dir.exists() {
+                    console.error(
+                        f"Target '{target_name}' not set up. Run 'jac setup {target_name}' first."
+                    );
+                    ctx.set_data("cancel_execution", True);
+                    ctx.set_data("cancel_return_code", 1);
+                    return;
+                }
+            } elif target_name == "watch" {
+                ios_dir = project_dir / "ios";
+                if not ios_dir.exists() {
+                    console.error(
+                        f"Target '{target_name}' not set up. Run 'jac setup {target_name}' first."
+                    );
+                    ctx.set_data("cancel_execution", True);
+                    ctx.set_data("cancel_return_code", 1);
+                    return;
+                }
             }
         }
         try {
@@ -569,6 +592,36 @@ def _handle_setup_target(ctx: HookContext) -> None {
                 );
                 console.print(
                     "This may indicate mobile setup did not complete successfully.",
+                    style="muted"
+                );
+                ctx.set_data("cancel_execution", True);
+                ctx.set_data("cancel_return_code", 1);
+                return;
+            }
+        }
+        if target_name == "hj" {
+            android_dir = project_dir / "android";
+            if not android_dir.exists() {
+                console.error(
+                    f"Setup completed but Android wrapper not found at: {android_dir}"
+                );
+                console.print(
+                    "This may indicate hijac setup did not complete successfully.",
+                    style="muted"
+                );
+                ctx.set_data("cancel_execution", True);
+                ctx.set_data("cancel_return_code", 1);
+                return;
+            }
+        }
+        if target_name == "watch" {
+            ios_dir = project_dir / "ios";
+            if not ios_dir.exists() {
+                console.error(
+                    f"Setup completed but iOS wrapper not found at: {ios_dir}"
+                );
+                console.print(
+                    "This may indicate watch setup did not complete successfully.",
                     style="muted"
                 );
                 ctx.set_data("cancel_execution", True);

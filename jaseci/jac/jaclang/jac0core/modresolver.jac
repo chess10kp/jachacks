@@ -64,6 +64,12 @@ def _candidate_from(base: str, parts: list[str]) -> (tuple[(str, str)] | None) {
         if os.path.isfile(os.path.join(candidate, '__init__.jac')) {
             return (os.path.join(candidate, '__init__.jac'), 'jac');
         }
+        if os.path.isfile(os.path.join(candidate, '__init__.cl.jac')) {
+            return (os.path.join(candidate, '__init__.cl.jac'), 'jac');
+        }
+        if os.path.isfile(os.path.join(candidate, '__init__.hj.jac')) {
+            return (os.path.join(candidate, '__init__.hj.jac'), 'jac');
+        }
         if os.path.isfile(os.path.join(candidate, '__init__.py')) {
             return (os.path.join(candidate, '__init__.py'), 'py');
         }
@@ -74,11 +80,14 @@ def _candidate_from(base: str, parts: list[str]) -> (tuple[(str, str)] | None) {
     if os.path.isfile((candidate + '.sv.jac')) {
         return ((candidate + '.sv.jac'), 'jac');
     }
-    if os.path.isfile((candidate + '.na.jac')) {
-        return ((candidate + '.na.jac'), 'jac');
-    }
     if os.path.isfile((candidate + '.cl.jac')) {
         return ((candidate + '.cl.jac'), 'jac');
+    }
+    if os.path.isfile((candidate + '.hj.jac')) {
+        return ((candidate + '.hj.jac'), 'jac');
+    }
+    if os.path.isfile((candidate + '.na.jac')) {
+        return ((candidate + '.na.jac'), 'jac');
     }
     if os.path.isfile((candidate + '.py')) {
         return ((candidate + '.py'), 'py');
@@ -273,6 +282,7 @@ def resolve_module(target: str, base_path: str) -> tuple[(str, str)] {
         }
         target_jac = actual_parts[-1] + '.jac';
         target_cl_jac = actual_parts[-1] + '.cl.jac';
+        target_hj_jac = actual_parts[-1] + '.hj.jac';
         target_py = actual_parts[-1] + '.py';
         target_js = actual_parts[-1] + '.js';
         for (root, _, files) in os.walk(jacpath) {
@@ -281,6 +291,9 @@ def resolve_module(target: str, base_path: str) -> tuple[(str, str)] {
             }
             if (target_cl_jac in files) {
                 return (os.path.join(root, target_cl_jac), 'jac');
+            }
+            if (target_hj_jac in files) {
+                return (os.path.join(root, target_hj_jac), 'jac');
             }
             if (target_py in files) {
                 return (os.path.join(root, target_py), 'py');

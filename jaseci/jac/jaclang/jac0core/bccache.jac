@@ -1,7 +1,7 @@
 """File discovery utilities for Jac module caching.
 
 Provides functions to discover annex files (.impl.jac, .test.jac),
-variant files (.sv.jac, .cl.jac, .na.jac), and base files for a
+variant files (.sv.jac, .cl.jac, .hj.jac, .na.jac), and base files for a
 given Jac source path. Used by JIR cache invalidation and formatter.
 """
 import os;
@@ -29,7 +29,7 @@ def get_global_cache_dir -> Path {
     }
 }
 
-"""Discover annex files (.impl.jac, .test.jac) for a source .jac or .cl.jac file.
+"""Discover annex files (.impl.jac, .test.jac) for a source .jac, .cl.jac, or .hj.jac file.
 
     Searches: same directory, module-specific folder (foo.impl/), shared folder (impl/, test/).
     """
@@ -41,14 +41,14 @@ def discover_annex_files(source_path: str, suffix: str = '.impl.jac') -> list[st
     base = src.stem;
     # Determine the source file's own variant context (if any).
     src_variant: (str | None) = None;
-    for vext in ('.sv', '.cl', '.na') {
+    for vext in ('.sv', '.cl', '.hj', '.na') {
         if base.endswith(vext) {
             src_variant = vext;
             base = base[:-len(vext)];
             break;
         }
     }
-    # When the source is a variant (.sv/.cl/.na) and no bare .jac head
+    # When the source is a variant (.sv/.cl/.hj/.na) and no bare .jac head
     # exists, bare annex files (no variant suffix) belong to this variant.
     bare_head_exists = (
         src_variant is not None and (src.parent / (base + '.jac')).is_file()
@@ -74,7 +74,7 @@ def discover_annex_files(source_path: str, suffix: str = '.impl.jac') -> list[st
             # Determine the annex file's variant context.
             annex_stem = f.name[:-len(suffix)];  # e.g. "svc.sv" from "svc.sv.impl.jac"
             annex_variant: (str | None) = None;
-            for vext in ('.sv', '.cl', '.na') {
+            for vext in ('.sv', '.cl', '.hj', '.na') {
                 if annex_stem.endswith(vext) {
                     annex_variant = vext;
                     break;
@@ -96,10 +96,10 @@ def discover_annex_files(source_path: str, suffix: str = '.impl.jac') -> list[st
     return results;
 }
 
-"""Discover variant files (.sv.jac, .cl.jac, .na.jac) for a head module.
+"""Discover variant files (.sv.jac, .cl.jac, .hj.jac, .na.jac) for a head module.
 
     The head module is whichever file has the highest precedence among the
-    variants that exist on disk:  .jac > .sv.jac > .cl.jac > .na.jac
+    variants that exist on disk:  .jac > .sv.jac > .cl.jac > .hj.jac > .na.jac
 
     Given the head, this function returns all *lower-precedence* variant
     files that exist.  For example if only ``main.sv.jac`` and ``main.na.jac``
@@ -107,7 +107,7 @@ def discover_annex_files(source_path: str, suffix: str = '.impl.jac') -> list[st
 
     Impl and test files are never considered heads or variants.
     """
-glob _VARIANT_SUFFIXES: list[str] = ['.sv.jac', '.cl.jac', '.na.jac'];
+glob _VARIANT_SUFFIXES: list[str] = ['.sv.jac', '.cl.jac', '.hj.jac', '.na.jac'];
 
 def discover_variant_files(source_path: str) -> list[str] {
     src = Path(source_path).resolve();
@@ -121,7 +121,7 @@ def discover_variant_files(source_path: str) -> list[str] {
     stem = src.stem;  # e.g. "main" or "main.sv"
     head_suffix: (str | None) = None;
     for vs in _VARIANT_SUFFIXES {
-        ext = vs[:-4];  # ".sv", ".cl", ".na"
+        ext = vs[:-4];  # ".sv", ".cl", ".hj", ".na"
         if stem.endswith(ext) {
             head_suffix = vs;
             stem = stem[:-len(ext)];
@@ -161,7 +161,7 @@ def discover_variant_files(source_path: str) -> list[str] {
     return variants;
 }
 
-"""Discover the base .jac or .cl.jac file for an annex file (.impl.jac, .test.jac).
+"""Discover the base .jac, .cl.jac, or .hj.jac file for an annex file (.impl.jac, .test.jac).
 
     Searches: same directory, module-specific folder (foo.impl/), shared folder (impl/).
     For multi-part names like "foo.bar.impl.jac", only the first component is used.
@@ -181,7 +181,7 @@ def discover_base_file(annex_path: str) -> (str | None) {
                 candidates.append((src.parent.parent, base_name));
             }
             for (directory, name) in candidates {
-                for ext in ('.jac', '.cl.jac') {
+                for ext in ('.jac', '.cl.jac', '.hj.jac') {
                     path = directory / f"{name}{ext}";
                     if (path.is_file() and (path != src)) {
                         return str(path);

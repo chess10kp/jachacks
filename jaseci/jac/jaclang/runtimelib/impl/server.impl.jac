@@ -389,7 +389,7 @@ impl ModuleIntrospector._extract_access_levels -> None {
         }
         try {
             source_file = item.from_loc.resolve_relative_path();
-            if not source_file.endswith(('.jac', '.cl.jac')) {
+            if not source_file.endswith(('.jac', '.cl.jac', '.hj.jac')) {
                 return;
             }
         } except Exception {

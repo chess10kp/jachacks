@@ -291,7 +291,7 @@ def _coerce_module(
     _recalculate_parents(module);
 }
 
-"""Coerce a .cl.jac module to client context."""
+"""Coerce a .cl.jac or .hj.jac module to client context."""
 def _coerce_client_module(module: uni.Module) -> None {
     _coerce_module(
         module,

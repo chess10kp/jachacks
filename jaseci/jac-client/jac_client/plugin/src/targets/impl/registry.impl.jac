@@ -96,6 +96,10 @@ impl TargetFactory.create_by_type(
         import from jac_client.plugin.src.targets.capacitor_mobile_target { CapacitorMobileTarget }
         target = CapacitorMobileTarget();
         target.project_dir = project_dir;
+    } elif target_type == TargetType.HJ {
+        import from jac_client.plugin.src.targets.hj_mobile_target { HjMobileTarget }
+        target = HjMobileTarget();
+        target.project_dir = project_dir;
     } elif target_type == TargetType.WATCH {
         import from jac_client.plugin.src.targets.watch_target { WatchTarget }
         target = WatchTarget();
@@ -122,7 +126,7 @@ impl TargetFactory.get_default(project_dir: Path) -> ClientTarget {
 impl TargetFactory.get_available_targets -> list[TargetType] {
     # Import inside function to avoid circular import
     import from jac_client.plugin.src.targets.registry { TargetType }
-    return [TargetType.WEB, TargetType.DESKTOP, TargetType.PWA, TargetType.MOBILE, TargetType.WATCH];
+    return [TargetType.WEB, TargetType.DESKTOP, TargetType.PWA, TargetType.MOBILE, TargetType.HJ, TargetType.WATCH];
 }
 
 """Get list of available target names as strings."""

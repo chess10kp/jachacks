@@ -7,6 +7,7 @@ import from jac_client.plugin.src.targets.web_target { WebTarget }
 import from jac_client.plugin.src.targets.desktop_target { DesktopTarget }
 import from jac_client.plugin.src.targets.pwa_target { PWATarget }
 import from jac_client.plugin.src.targets.capacitor_mobile_target { CapacitorMobileTarget }
+import from jac_client.plugin.src.targets.hj_mobile_target { HjMobileTarget }
 import from jac_client.plugin.src.targets.watch_target { WatchTarget }
 # Note: Jac's annex pass should auto-discover .impl.jac files automatically
 # The impl files in impl/ directory should be loaded when the base classes are imported
@@ -29,6 +30,10 @@ def register_targets -> None {
     # Register mobile target (Capacitor)
     mobile_target = CapacitorMobileTarget();
     registry.register(mobile_target);
+
+    # Register hijac target (Capacitor + hj)
+    hj_target = HjMobileTarget();
+    registry.register(hj_target);
 
     # Register watch target
     watch_target = WatchTarget();
